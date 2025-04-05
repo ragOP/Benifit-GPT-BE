@@ -3,16 +3,21 @@ const app = express();
 const PORT = 5000;
 const cors = require("cors");
 const UserResponse = require("./userResponse");
+const { connectToDatabase } = require("./db");
 
 app.use(express.json());
 app.use(cors());
+
+(async () => {
+  await connectToDatabase();
+})();
 
 app.post("/api/messages", async (req, res) => {
   const { userId, messages, qualifiedFor } = req.body;
 
   let isQualified = false;
 
-  if(qualifiedFor.length > 0) {
+  if (qualifiedFor.length > 0) {
     isQualified = true;
   }
 
@@ -36,6 +41,17 @@ app.post("/api/messages", async (req, res) => {
   return res
     .status(200)
     .json({ data: responses, message: "Responses saved successfully" });
+});
+
+
+app.get("/api/messages/:userId", async (req, res) => {
+  const { userId } = req.params;
+
+  const responses = await UserResponse.find({ userId: userId });
+  if (!responses) {
+    return res.status(404).json({ error: "No responses found" });
+  }
+  return res.status(200).json({ data: responses });
 });
 
 app.listen(PORT, () => {

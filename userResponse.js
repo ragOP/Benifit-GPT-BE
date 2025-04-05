@@ -11,7 +11,7 @@ const userResponseSchema = new mongoose.Schema(
       required: true,
     },
     qualifiedFor: {
-      type: String,
+      type: [String],
       default: null,
     },
     isQualified: {
