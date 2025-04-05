@@ -1,7 +1,11 @@
 const mongoose = require('mongoose');
 
 exports.connectToDatabase = () => {
-    mongoose.connect('mongodb+srv://cheif:oPJiwTMYr9Bx1RX1@benifit-gpt.jbuljrl.mongodb.net/?retryWrites=true&w=majority&appName=Benifit-GPT')
+    if (!process.env.MONGODB_URI) {
+        console.error('MongoDB URI is not defined in environment variables');
+        return;
+    }
+    mongoose.connect(process.env.MONGODB_URI)
     .then(() => console.log('MongoDB connected...'))
     .catch(err => console.error('MongoDB connection error:', err));
 };
