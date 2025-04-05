@@ -15,6 +15,8 @@ app.use(cors());
 app.post("/api/messages", async (req, res) => {
   const { userId, messages, qualifiedFor } = req.body;
 
+    console.log("User ID:", userId);
+
   let isQualified = false;
 
   if (qualifiedFor.length > 0) {
@@ -46,8 +48,10 @@ app.post("/api/messages", async (req, res) => {
 
 app.get("/api/messages/:userId", async (req, res) => {
   const { userId } = req.params;
+  console.log("User ID:", userId);
 
-  const responses = await UserResponse.find({ userId: userId });
+  const responses = await UserResponse.findOne({ userId: userId });
+  console.log(responses);
   if (!responses) {
     return res.status(404).json({ error: "No responses found" });
   }
