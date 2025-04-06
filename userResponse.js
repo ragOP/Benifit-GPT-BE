@@ -11,8 +11,13 @@ const userResponseSchema = new mongoose.Schema(
       required: true,
     },
     qualifiedFor: {
-      type: [String],
-      default: null,
+      type: {
+        medicare: { type: Boolean, default: false },
+        creditDebtRelief: { type: Boolean, default: false },
+        discountedAutoInsurancePlan: { type: Boolean, default: false },
+        higherCompensationForAccidents: { type: Boolean, default: false },
+        aca: { type: Boolean, default: false },
+      },
     },
     isQualified: {
       type: Boolean,

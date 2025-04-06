@@ -20,11 +20,11 @@ app.use(cors());
 app.post("/api/messages", async (req, res) => {
   const { userId, messages, qualifiedFor } = req.body;
 
-    console.log("User ID:", userId);
+  console.log("User ID:", userId);
 
   let isQualified = false;
 
-  if (qualifiedFor.length > 0) {
+  if (Object.keys(qualifiedFor).length > 0) {
     isQualified = true;
   }
 
