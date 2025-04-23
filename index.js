@@ -54,6 +54,16 @@ app.post("/api/messages", async (req, res) => {
     .json({ data: responses, message: "Responses saved successfully" });
 });
 
+app.get("/api/messages", async (req, res) => {
+  try {
+    const allResponses = await UserResponse.find({});
+    return res.status(200).json({ data: allResponses });
+  } catch (error) {
+    console.error("Error fetching all responses:", error);
+    return res.status(500).json({ error: "Failed to fetch responses" });
+  }
+});
+
 
 app.get("/api/messages/:userId", async (req, res) => {
   const { userId } = req.params;
