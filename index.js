@@ -18,7 +18,11 @@ app.use(cors());
 })();
 
 app.post("/api/messages", async (req, res) => {
-  const { userId, messages, qualifiedFor } = req.body;
+  const { userId, replies, qualifiedFor } = req.body;
+
+  console.log("Request body:", req.body);
+  console.log("Qualified For:", qualifiedFor);
+  console.log("Qualified For keys:", Object.keys(qualifiedFor));
 
   console.log("User ID:", userId);
 
@@ -28,17 +32,17 @@ app.post("/api/messages", async (req, res) => {
     isQualified = true;
   }
 
-  if (!Array.isArray(messages)) {
+  if (!Array.isArray(replies)) {
     return res.status(400).json({ error: "messages must be an array" });
   }
 
-  const userMessages = messages
-    .filter((msg) => msg.type === "user")
-    .map((msg) => msg.text);
+  // const userMessages = messages
+  //   .filter((msg) => msg.type === "user")
+  //   .map((msg) => msg.text);
 
   const responses = await UserResponse.create({
     userId: userId,
-    responses: userMessages,
+    responses: replies,
     qualifiedFor: qualifiedFor,
     isQualified: isQualified,
   });
