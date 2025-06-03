@@ -8,6 +8,7 @@ const cors = require("cors");
 
 
 const UserResponse = require("./userResponse");
+const ChatbotResponse = require("./ChatbotResponse");
 const { connectToDatabase } = require("./db");
 
 app.use(express.json());
@@ -64,22 +65,14 @@ app.get("/api/messages", async (req, res) => {
   }
 });
 
-app.post("/api/submit", async (req, res) => {
+router.post("/api/chatbot", async (req, res) => {
   try {
-    const { userId, responses, qualifiedFor, isQualified } = req.body;
-
-    const newEntry = new UserResponse({
-      userId,
-      responses,
-      qualifiedFor,
-      isQualified,
-    });
-
+    const newEntry = new ChatbotResponse(req.body);
     await newEntry.save();
-    res.status(200).json({ message: "✅ Saved successfully" });
+    res.status(200).json({ message: "Chatbot response saved ✅" });
   } catch (err) {
-    console.error("❌ Error saving:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error saving chatbot response:", err);
+    res.status(500).json({ error: "Server error ❌" });
   }
 });
 app.get("/api/messages/:userId", async (req, res) => {
