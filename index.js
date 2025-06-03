@@ -65,7 +65,7 @@ app.get("/api/messages", async (req, res) => {
   }
 });
 
-router.post("/api/chatbot", async (req, res) => {
+app.post("/api/chatbot", async (req, res) => {
   try {
     const newEntry = new ChatbotResponse(req.body);
     await newEntry.save();
