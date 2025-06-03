@@ -75,6 +75,15 @@ app.post("/api/chatbot", async (req, res) => {
     res.status(500).json({ error: "Server error ❌" });
   }
 });
+
+app.get("api/chatbot", async (req, res) => {
+  try {
+    const responses = await ChatbotResponse.find().sort({ createdAt: -1 });
+    res.status(200).json(responses);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch chatbot responses" });
+  }
+});
 app.get("/api/messages/:userId", async (req, res) => {
   const { userId } = req.params;
   console.log("User ID:", userId);
