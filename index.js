@@ -12,7 +12,8 @@ const { connectToDatabase } = require("./db");
 
 app.use(express.json());
 app.use(cors());
-
+const answerSchema = new mongoose.Schema({}, { strict: false });
+const Answer = mongoose.model("Answer", answerSchema);
 (async () => {
   await connectToDatabase();
 })();
@@ -64,7 +65,17 @@ app.get("/api/messages", async (req, res) => {
   }
 });
 
-
+app.post("/api/submit", async (req, res) => {
+  try {
+    const data = req.body;
+    const newAnswer = new Answer(data);
+    await newAnswer.save();
+    res.status(200).json({ message: "Answers saved!" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to save answers" });
+  }
+});
 app.get("/api/messages/:userId", async (req, res) => {
   const { userId } = req.params;
   console.log("User ID:", userId);
