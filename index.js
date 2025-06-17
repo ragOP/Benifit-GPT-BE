@@ -76,6 +76,16 @@ app.post("/api/chatbot", async (req, res) => {
   }
 });
 
+app.get("/api/chatbot", async (req, res) => {
+  try {
+    const responses = await ChatbotResponse.find().sort({ createdAt: -1 });
+    res.status(200).json(responses);
+  } catch (err) {
+    console.error("Error fetching chatbot responses:", err);
+    res.status(500).json({ error: "Failed to fetch chatbot responses" });
+  }
+});
+
 app.get("/chatbotmessages", async (req, res) => {
   try {
     const responses = await ChatbotResponse.find().sort({ createdAt: -1 });

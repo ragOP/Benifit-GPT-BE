@@ -10,7 +10,6 @@ const chatbotResponseSchema = new mongoose.Schema(
     healthConditions: { type: String, required: true },
     housingStatus: { type: String, required: true },
     drivesWeekly: { type: String, required: true },
-    recentDUI: { type: String, required: true },
     accidents: { type: String, required: true },
     hasChildren: { type: String, required: true },
     creditCardDebt: { type: String, required: true },
