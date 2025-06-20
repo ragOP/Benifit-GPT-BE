@@ -109,10 +109,10 @@ app.get("/api/messages/:userId", async (req, res) => {
 
 app.post("/email", async (req, res) => {
   const {email} = req.body;
-  const res = await Email.create({
+  const response = await Email.create({
     email
   });
-  return res.status(200).json({ data: res });
+  return res.status(200).json({ data: response });
 })
 
 app.get("/email", async (req, res) => {
