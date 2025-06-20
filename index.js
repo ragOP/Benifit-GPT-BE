@@ -10,6 +10,7 @@ const cors = require("cors");
 const UserResponse = require("./userResponse");
 const ChatbotResponse = require("./ChatbotResponse");
 const { connectToDatabase } = require("./db");
+const Email = require("./email");
 
 app.use(express.json());
 app.use(cors());
@@ -105,6 +106,14 @@ app.get("/api/messages/:userId", async (req, res) => {
   }
   return res.status(200).json({ data: responses });
 });
+
+app.post("/email", async (req, res) => {
+  const {email} = req.body;
+  const res = await Email.create({
+    email
+  });
+  return res.status(200).json({ data: res });
+})
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
