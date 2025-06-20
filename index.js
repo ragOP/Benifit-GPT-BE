@@ -115,6 +115,11 @@ app.post("/email", async (req, res) => {
   return res.status(200).json({ data: res });
 })
 
+app.get("/email", async (req, res) => {
+  const emails = await Email.find({});
+  return res.status(200).json({ data: emails });
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
