@@ -129,7 +129,7 @@ const TAGS = {
 };
 
 app.post("/response/create", async (req, res) => {
-  const { fullName, email, age, userId, zipCode, tags } = req.body;
+  const { fullName, email, age, user_id, zipcode, tags } = req.body;
   const tagsArray = tags.map((tag) => {
     return TAGS[tag];
   });
@@ -137,8 +137,8 @@ app.post("/response/create", async (req, res) => {
     fullName,
     email,
     age,
-    userId,
-    zipCode,
+    userId: user_id,
+    zipCode: zipcode,
     tags: tagsArray,
   });
   return res.status(200).json({ data: response });
