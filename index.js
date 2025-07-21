@@ -152,7 +152,7 @@ app.get("/response/all", async (req, res) => {
 
 app.get("/check/offer", async (req, res) => {
   const { email, name } = req.query;
-    const response = await Response.findOne({ email: email, fullName: name });
+  const response = await Response.findOne({ email: email, fullName: name });
   return res.status(200).json({ data: response });
 });
 
