@@ -159,6 +159,8 @@ app.get("/check/offer", async (req, res) => {
 app.post('/email/submit', async (req, res) => {
   const { email, name, userId } = req.body;
 
+  console.log(userId, "userId")
+
   try {
     const response = await axios.post('https://api.brevo.com/v3/contacts', {
       email,
