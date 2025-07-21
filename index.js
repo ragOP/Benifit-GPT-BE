@@ -134,9 +134,10 @@ app.post("/response/create", async (req, res) => {
   const tagsArray = tags.map((tag) => {
     return TAGS[tag];
   });
+  const transformedEmail = email.toLowerCase();
   const response = await Response.create({
     fullName,
-    email,
+    email: transformedEmail,
     age,
     userId: user_id,
     zipCode: zipcode,
@@ -152,29 +153,33 @@ app.get("/response/all", async (req, res) => {
 
 app.get("/check/offer", async (req, res) => {
   const { email, name } = req.query;
-  const response = await Response.findOne({ email: email, fullName: name });
+  const response = await Response.findOne({ email: email });
   return res.status(200).json({ data: response });
 });
 
-app.post('/email/submit', async (req, res) => {
+app.post("/email/submit", async (req, res) => {
   const { email, name, userId } = req.body;
 
   try {
-    const response = await axios.post('https://api.brevo.com/v3/contacts', {
-      email,
-      attributes: {
-        FIRSTNAME: name,
-        LASTNAME: email,
-        USER_ID: userId
+    const response = await axios.post(
+      "https://api.brevo.com/v3/contacts",
+      {
+        email,
+        attributes: {
+          FIRSTNAME: name,
+          LASTNAME: email,
+          USER_ID: userId,
+        },
+        listIds: [5],
+        updateEnabled: true,
       },
-      listIds: [5], 
-      updateEnabled: true
-    }, {
-      headers: {
-        'api-key': process.env.BREVO_API_KEY,
-        'Content-Type': 'application/json'
+      {
+        headers: {
+          "api-key": process.env.BREVO_API_KEY,
+          "Content-Type": "application/json",
+        },
       }
-    });
+    );
 
     res.status(200).json({ success: true, data: response.data });
   } catch (error) {
