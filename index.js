@@ -151,15 +151,13 @@ app.get("/response/all", async (req, res) => {
 });
 
 app.get("/check/offer", async (req, res) => {
-  const { email, userId } = req.query;
-    const response = await Response.findOne({ email: email, userId: userId });
+  const { email, name } = req.query;
+    const response = await Response.findOne({ email: email, name: name });
   return res.status(200).json({ data: response });
 });
 
 app.post('/email/submit', async (req, res) => {
   const { email, name, userId } = req.body;
-
-  console.log(userId, "userId")
 
   try {
     const response = await axios.post('https://api.brevo.com/v3/contacts', {
