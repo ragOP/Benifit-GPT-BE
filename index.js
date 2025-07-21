@@ -2,15 +2,14 @@ const express = require("express");
 const app = express();
 require("dotenv").config();
 
-
 const PORT = process.env.PORT || 5000;
 const cors = require("cors");
-
 
 const UserResponse = require("./userResponse");
 const ChatbotResponse = require("./ChatbotResponse");
 const { connectToDatabase } = require("./db");
 const Email = require("./email");
+const Response = require("./response");
 
 app.use(express.json());
 app.use(cors());
@@ -108,16 +107,46 @@ app.get("/api/messages/:userId", async (req, res) => {
 });
 
 app.post("/email", async (req, res) => {
-  const {email} = req.body;
+  const { email } = req.body;
   const response = await Email.create({
-    email
+    email,
   });
   return res.status(200).json({ data: response });
-})
+});
 
 app.get("/email", async (req, res) => {
   const emails = await Email.find({});
   return res.status(200).json({ data: emails });
+});
+
+const TAGS = {
+  is_md: "Medicare",
+  is_ssdi: "SSDI",
+  is_auto: "Auto",
+  is_mva: "MVA",
+  is_debt: "Debt",
+  is_rvm: "Reverse Mortgage",
+};
+
+app.post("/response/create", async (req, res) => {
+  const { fullName, email, age, userId, zipCode, tags } = req.body;
+  const tagsArray = tags.map((tag) => {
+    return TAGS[tag];
+  });
+  const response = await Response.create({
+    fullName,
+    email,
+    age,
+    userId,
+    zipCode,
+    tags: tagsArray,
+  });
+  return res.status(200).json({ data: response });
+});
+
+app.get("/response/all", async (req, res) => {
+  const response = await Response.find({});
+  return res.status(200).json({ data: response });
 });
 
 app.listen(PORT, () => {
