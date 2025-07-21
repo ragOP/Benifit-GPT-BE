@@ -1,4 +1,5 @@
 const express = require("express");
+const axios = require("axios");
 const app = express();
 require("dotenv").config();
 
@@ -151,8 +152,35 @@ app.get("/response/all", async (req, res) => {
 
 app.get("/check/offer", async (req, res) => {
   const { email, userId } = req.query;
-  const response = await Response.findOne({ email: email, userId: userId });
+    const response = await Response.findOne({ email: email, userId: userId });
   return res.status(200).json({ data: response });
+});
+
+app.post('/email/submit', async (req, res) => {
+  const { email, name, userId } = req.body;
+
+  try {
+    const response = await axios.post('https://api.brevo.com/v3/contacts', {
+      email,
+      attributes: {
+        FIRSTNAME: name,
+        LASTNAME: email,
+        USER_ID: userId
+      },
+      listIds: [5], 
+      updateEnabled: true
+    }, {
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    res.status(200).json({ success: true, data: response.data });
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    res.status(500).json({ success: false, error: error.response?.data });
+  }
 });
 
 app.listen(PORT, () => {
