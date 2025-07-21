@@ -149,6 +149,12 @@ app.get("/response/all", async (req, res) => {
   return res.status(200).json({ data: response });
 });
 
+app.get("/check/offer", async (req, res) => {
+  const { email, userId } = req.query;
+  const response = await Response.findOne({ email: email, userId: userId });
+  return res.status(200).json({ data: response });
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
