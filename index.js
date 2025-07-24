@@ -152,8 +152,8 @@ app.get("/response/all", async (req, res) => {
 });
 
 app.get("/check/offer", async (req, res) => {
-  const { userId } = req.query;
-  const response = await Response.findOne({ userId: userId });
+  const { name } = req.query;
+  const response = await Response.findOne({ fullName: name });
   return res.status(200).json({ data: response });
 });
 
