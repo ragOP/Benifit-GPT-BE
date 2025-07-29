@@ -11,6 +11,7 @@ const ChatbotResponse = require("./ChatbotResponse");
 const { connectToDatabase } = require("./db");
 const Email = require("./email");
 const Response = require("./response");
+const Response2 = require("./response2");
 
 app.use(express.json());
 app.use(cors());
@@ -158,6 +159,65 @@ app.get("/check/offer", async (req, res) => {
 });
 
 app.post("/email/submit", async (req, res) => {
+  const { email, name, userId } = req.body;
+
+  try {
+    const response = await axios.post(
+      "https://api.brevo.com/v3/contacts",
+      {
+        email,
+        attributes: {
+          FIRSTNAME: name,
+          LASTNAME: email,
+          USER_ID: userId,
+        },
+        listIds: [5],
+        updateEnabled: true,
+      },
+      {
+        headers: {
+          "api-key": process.env.BREVO_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    res.status(200).json({ success: true, data: response.data });
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    res.status(500).json({ success: false, error: error.response?.data });
+  }
+});
+
+app.post("/response/create2", async (req, res) => {
+  const { fullName, email, age, user_id, zipcode, tags } = req.body;
+  const tagsArray = tags.map((tag) => {
+    return TAGS[tag];
+  });
+  const transformedEmail = email.toLowerCase();
+  const response = await Response2.create({
+    fullName,
+    email: transformedEmail,
+    age,
+    userId: user_id,
+    zipCode: zipcode,
+    tags: tagsArray,
+  });
+  return res.status(200).json({ data: response });
+});
+
+app.get("/response/all2", async (req, res) => {
+  const response = await Response2.find({});
+  return res.status(200).json({ data: response });
+});
+
+app.get("/check/offer2", async (req, res) => {
+  const { name } = req.query;
+  const response = await Response2.findOne({ fullName: name });
+  return res.status(200).json({ data: response });
+});
+
+app.post("/email/submit2", async (req, res) => {
   const { email, name, userId } = req.body;
 
   try {
