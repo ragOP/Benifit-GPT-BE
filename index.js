@@ -154,7 +154,9 @@ app.get("/response/all", async (req, res) => {
 
 app.get("/check/offer", async (req, res) => {
   const { name } = req.query;
-  const response = await Response.findOne({ fullName: name });
+  const response = await Response.findOne({
+    fullName: new RegExp(`^${name}\\s*$`),
+  });
   return res.status(200).json({ data: response });
 });
 
