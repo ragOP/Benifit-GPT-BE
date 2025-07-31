@@ -264,14 +264,9 @@ app.get("/check/model", async (req, res) => {
     const r2 = await Response2.findOne({ fullName });
     if (r2) results.push("Response2");
 
-    const r3 = await UserResponse.findOne({ fullName });
-    if (r3) results.push("UserResponse");
+  
 
-    const r4 = await ChatbotResponse.findOne({ fullName });
-    if (r4) results.push("ChatbotResponse");
 
-    const r5 = await Email.findOne({ fullName });
-    if (r5) results.push("Email");
 
     if (results.length === 0) {
       return res.status(404).json({ message: "Not found in any model" });
