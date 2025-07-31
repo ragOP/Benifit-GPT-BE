@@ -264,7 +264,8 @@ app.get("/check/model", async (req, res) => {
     const r2 = await Response2.findOne({ fullName });
     if (r2) results.push("Response2");
 
-  
+   const r3 = await ChatbotResponse.findOne({ fullName });
+    if (r3) results.push("ChatbotResponse");
 
 
 
