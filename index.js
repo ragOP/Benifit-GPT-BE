@@ -12,6 +12,7 @@ const { connectToDatabase } = require("./db");
 const Email = require("./email");
 const Response = require("./response");
 const Response2 = require("./response2");
+const Response3 = require("./response3");
 
 app.use(express.json());
 app.use(cors());
@@ -322,6 +323,38 @@ return res.json({ url: json.data.attributes.url });
     return res.status(500).json({ error: 'checkout creation failed' })
   }
 })
+
+// Lander third routes --->
+
+app.post("/email3", async (req, res) => {
+  const { email } = req.body;
+  const response = await Email.create({
+    email,
+  });
+  return res.status(200).json({ data: response });
+});
+
+app.post("/response/create3", async (req, res) => {
+  const { fullName, email, age, user_id, zipcode, tags } = req.body;
+  const tagsArray = tags.map((tag) => {
+    return TAGS[tag];
+  });
+  const transformedEmail = email.toLowerCase();
+  const response = await Response3.create({
+    fullName,
+    email: transformedEmail,
+    age,
+    userId: user_id,
+    zipCode: zipcode,
+    tags: tagsArray,
+  });
+  return res.status(200).json({ data: response });
+});
+
+app.get("/response/all3", async (req, res) => {
+  const response = await Response3.find({});
+  return res.status(200).json({ data: response });
+});
 
 
 app.listen(PORT, () => {
