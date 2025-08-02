@@ -282,6 +282,47 @@ app.get("/check/model", async (req, res) => {
   }
 });
 
+app.post('/api/create-checkout', async (req, res) => {
+  const { variantId } = req.body
+  try {
+    const resp = await fetch('https://api.lemonsqueezy.com/v1/checkouts', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/vnd.api+json',
+        'Content-Type': 'application/vnd.api+json',
+        Authorization: `Bearer ${process.env.LEMON_SQUEEZY_API_KEY}`,
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'checkouts',
+          attributes: {
+            custom_price: 100,            // $1.00 in cents
+            checkout_options: { embed: true }, // or false for hosted
+            product_options: {
+              redirect_url: process.env.AFTER_PAY_REDIRECT,
+            },
+          },
+          relationships: {
+            store: { data: { type: 'stores', id: process.env.STORE_ID.toString() } },
+            variant: { data: { type: 'variants', id: variantId.toString() } },
+          },
+        },
+      }),
+    })
+    const json = await resp.json()
+ if (!json || !json.data || !json.data.attributes || !json.data.attributes.url) {
+  console.error('Invalid Lemon API response:', json);
+  return res.status(500).json({ error: 'Invalid Lemon API response' });
+}
+
+return res.json({ url: json.data.attributes.url });
+
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'checkout creation failed' })
+  }
+})
+
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
