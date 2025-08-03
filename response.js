@@ -25,6 +25,10 @@ const responseSchema = new mongoose.Schema({
         type: [String],
         required: true
     },
+    origin: {
+        type: String,
+        default: ""
+    }
 }, { timestamps: true });
 
 const Response = mongoose.model("Response", responseSchema);
