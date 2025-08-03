@@ -151,7 +151,7 @@ app.post("/response/create", async (req, res) => {
 });
 
 app.get("/response/all", async (req, res) => {
-  const response = await Response.find({});
+  const response = await Response.find({}).sort({ createdAt: -1 });
   return res.status(200).json({ data: response });
 });
 
