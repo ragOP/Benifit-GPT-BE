@@ -14,7 +14,7 @@ const Email = require("./email");
 const Response = require("./response");
 const Response2 = require("./response2");
 const Response3 = require("./response3");
-const stripe = new Stripe("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");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 app.use(express.json());
 app.use(cors());
 
