@@ -152,6 +152,27 @@ app.post("/response/create", async (req, res) => {
   return res.status(200).json({ data: response });
 });
 
+app.post("/api/update-record", async (req, res) => {
+  const { userId, isPaymentSuccess } = req.body;
+
+  try {
+    const updatedResponse = await Response.findOneAndUpdate(
+      { userId },
+      { isPaymentSuccess },
+      { new: true }
+    );
+
+    if (!updatedResponse) {
+      return res.status(404).json({ error: "Response not found" });
+    }
+
+    return res.status(200).json({ data: updatedResponse });
+  } catch (error) {
+    console.error("Error updating response:", error);
+    return res.status(500).json({ error: "Failed to update response" });
+  }
+});
+
 app.get("/response/all", async (req, res) => {
   const response = await Response.find({}).sort({ createdAt: -1 });
   return res.status(200).json({ data: response });

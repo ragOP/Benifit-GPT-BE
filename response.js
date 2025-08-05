@@ -33,6 +33,10 @@ const responseSchema = new mongoose.Schema({
         type: String,
         default: ""
     },
+    isPaymentSuccess: {
+        type: Boolean,
+        default: false
+    }
 }, { timestamps: true });
 
 const Response = mongoose.model("Response", responseSchema);
