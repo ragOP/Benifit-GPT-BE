@@ -28,7 +28,11 @@ const responseSchema = new mongoose.Schema({
     origin: {
         type: String,
         default: ""
-    }
+    },
+    sendMessageOn: {
+        type: String,
+        default: ""
+    },
 }, { timestamps: true });
 
 const Response = mongoose.model("Response", responseSchema);
