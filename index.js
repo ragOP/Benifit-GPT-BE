@@ -327,7 +327,9 @@ return res.json({ url: json.data.attributes.url });
     return res.status(500).json({ error: 'checkout creation failed' })
   }
 })
-app.post("/create-checkout-session", async (req, res) => {
+app.post("/api/create-checkout-session", async (req, res) => {
+  console.log("🎯 Stripe route hit");
+
   const { email, name, userId, amount } = req.body;
 
   try {
@@ -342,26 +344,29 @@ app.post("/create-checkout-session", async (req, res) => {
               name: "Your Benefits Report",
               description: `For ${name}`,
             },
-            unit_amount: amount, // in cents (100 = $1)
+            unit_amount: parseInt(amount) || 100,
           },
           quantity: 1,
         },
       ],
       customer_email: email,
-      success_url: "https://yourdomain.com/success",
-      cancel_url: "https://yourdomain.com/cancel",
+      success_url: "https://mybenefitsai.org/success",
+      cancel_url: "https://mybenefitsai.org/cancel",
       metadata: {
         userId,
         name,
       },
     });
 
-    res.status(200).json({ url: session.url });
+    console.log("✅ Stripe session created:", session.id);
+    return res.status(200).json({ url: session.url });
+
   } catch (err) {
-    console.error("Stripe Error", err);
-    res.status(500).json({ error: "Unable to create Stripe session" });
+    console.error("❌ Stripe Error:", err.message);
+    return res.status(500).json({ error: "Unable to create Stripe session", message: err.message });
   }
 });
+
 
 // Lander third routes --->
 
