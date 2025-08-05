@@ -13,7 +13,7 @@ const Email = require("./email");
 const Response = require("./response");
 const Response2 = require("./response2");
 const Response3 = require("./response3");
-
+const stripe = new Stripe("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");
 app.use(express.json());
 app.use(cors());
 
@@ -326,6 +326,41 @@ return res.json({ url: json.data.attributes.url });
     return res.status(500).json({ error: 'checkout creation failed' })
   }
 })
+app.post("/create-checkout-session", async (req, res) => {
+  const { email, name, userId, amount } = req.body;
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      mode: "payment",
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: "Your Benefits Report",
+              description: `For ${name}`,
+            },
+            unit_amount: amount, // in cents (100 = $1)
+          },
+          quantity: 1,
+        },
+      ],
+      customer_email: email,
+      success_url: "https://yourdomain.com/success",
+      cancel_url: "https://yourdomain.com/cancel",
+      metadata: {
+        userId,
+        name,
+      },
+    });
+
+    res.status(200).json({ url: session.url });
+  } catch (err) {
+    console.error("Stripe Error", err);
+    res.status(500).json({ error: "Unable to create Stripe session" });
+  }
+});
 
 // Lander third routes --->
 
