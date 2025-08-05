@@ -1,7 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const app = express();
-import Stripe from "stripe";
+const Stripe = require("stripe");
 require("dotenv").config();
 
 const PORT = process.env.PORT || 5000;
