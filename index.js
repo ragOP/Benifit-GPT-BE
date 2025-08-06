@@ -366,7 +366,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
               name: "Your Benefits Report",
               description: `For ${name}`,
             },
-            unit_amount: parseInt(amount) || 100,
+            unit_amount: parseInt(amount) || 10,
           },
           quantity: 1,
         },
