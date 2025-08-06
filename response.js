@@ -36,6 +36,10 @@ const responseSchema = new mongoose.Schema({
     isPaymentSuccess: {
         type: Boolean,
         default: false
+    },
+    number: {
+        type: String,
+        default: ""
     }
 }, { timestamps: true });
 
