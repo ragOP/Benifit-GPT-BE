@@ -390,7 +390,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
 });
 
 
-// Lander third routes --->
+// Lander third routess --->
 
 // app.post("/email3", async (req, res) => {
 //   const { email } = req.body;
