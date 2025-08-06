@@ -15,6 +15,7 @@ const Response = require("./response");
 const Response2 = require("./response2");
 const Response3 = require("./response3");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(cors());
 
@@ -420,6 +421,52 @@ app.post("/api/create-checkout-session", async (req, res) => {
 //   const response = await Response3.find({});
 //   return res.status(200).json({ data: response });
 // });
+app.post("/webhook", async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    console.error("❌ Webhook Error:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // ✅ On payment success
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+
+    const { customer_email: email, metadata } = session;
+    const { userId, name } = metadata;
+
+    console.log("✅ Payment success for:", email);
+
+    // 1. Update DB to mark payment success
+    try {
+      await axios.post("https://benifit-gpt-be.onrender.com/api/update-record", {
+        userId,
+        isPaymentSuccess: true,
+      });
+    } catch (e) {
+      console.error("❌ Failed to update record:", e.message);
+    }
+
+    // 2. Send email via Brevo
+    try {
+      await axios.post("https://benifit-gpt-be.onrender.com/email/submit", {
+        email,
+        name,
+        userId,
+      });
+    } catch (e) {
+      console.error("❌ Failed to send email:", e.message);
+    }
+  }
+
+  return res.status(200).json({ received: true });
+});
 
 
 app.listen(PORT, () => {
