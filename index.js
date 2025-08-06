@@ -323,7 +323,7 @@ app.post('/api/create-checkout', async (req, res) => {
         data: {
           type: 'checkouts',
           attributes: {
-            custom_price: 100,            // $1.00 in cents
+            custom_price: 10,            // $1.00 in cents
             checkout_options: { embed: true }, // or false for hosted
             product_options: {
               redirect_url: process.env.AFTER_PAY_REDIRECT,
