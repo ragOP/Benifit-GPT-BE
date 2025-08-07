@@ -375,7 +375,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
           quantity: 1,
         },
       ],
-      customer_email: email,
+      // customer_email: email,
       success_url: "https://mybenefitsai.org/success",
       cancel_url: "https://mybenefitsai.org/cancel",
       metadata: {
