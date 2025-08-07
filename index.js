@@ -139,7 +139,10 @@ app.post("/response/create", async (req, res) => {
   const tagsArray = tags.map((tag) => {
     return TAGS[tag];
   });
-  const transformedEmail = email.toLowerCase();
+  let transformedEmail = "";
+  if (email && email.length > 0) {
+  transformedEmail = email.toLowerCase();
+}
   const response = await Response.create({
     fullName,
     email: transformedEmail,
