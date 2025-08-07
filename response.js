@@ -3,23 +3,23 @@ const mongoose = require("mongoose");
 const responseSchema = new mongoose.Schema({
     fullName: {
         type: String,
-        required: true
+        default: ""
     },
     email: {
         type: String,
-        required: true
+        default: ""
     },
     age: {
         type: Number,
-        required: true
+        default: ""
     },
     userId: {
         type: String,
-        required: true
+        default: ""
     },
     zipCode: {
         type: String,
-        required: true
+        default: ""
     },
     tags: {
         type: [String],
