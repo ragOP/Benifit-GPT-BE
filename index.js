@@ -14,7 +14,11 @@ const Email = require("./email");
 const Response = require("./response");
 const Response2 = require("./response2");
 const Response3 = require("./response3");
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// (kept) Stripe init; added apiVersion for stability
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
+
+// Webhook must get raw body
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(cors());
@@ -29,11 +33,9 @@ app.post("/api/messages", async (req, res) => {
   console.log("Request body:", req.body);
   console.log("Qualified For:", qualifiedFor);
   console.log("Qualified For keys:", Object.keys(qualifiedFor));
-
   console.log("User ID:", userId);
 
   let isQualified = false;
-
   if (Object.keys(qualifiedFor).length > 0) {
     isQualified = true;
   }
@@ -41,10 +43,6 @@ app.post("/api/messages", async (req, res) => {
   if (!Array.isArray(replies)) {
     return res.status(400).json({ error: "messages must be an array" });
   }
-
-  // const userMessages = messages
-  //   .filter((msg) => msg.type === "user")
-  //   .map((msg) => msg.text);
 
   const responses = await UserResponse.create({
     userId: userId,
@@ -99,6 +97,7 @@ app.get("/chatbotmessages", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch chatbot responses" });
   }
 });
+
 app.get("/api/messages/:userId", async (req, res) => {
   const { userId } = req.params;
   console.log("User ID:", userId);
@@ -113,9 +112,7 @@ app.get("/api/messages/:userId", async (req, res) => {
 
 app.post("/email", async (req, res) => {
   const { email } = req.body;
-  const response = await Email.create({
-    email,
-  });
+  const response = await Email.create({ email });
   return res.status(200).json({ data: response });
 });
 
@@ -124,7 +121,7 @@ app.get("/email", async (req, res) => {
   return res.status(200).json({ data: emails });
 });
 
-// -------------------------------------------------- BENIFIT GPT ROUTES -------------------------------------------------- ////////////////////////////////////////////////////////
+// -------------------------------------------------- BENIFIT GPT ROUTES --------------------------------------------------
 const TAGS = {
   is_md: "Medicare",
   is_ssdi: "SSDI",
@@ -136,13 +133,11 @@ const TAGS = {
 
 app.post("/response/create", async (req, res) => {
   const { fullName, email, age, user_id, zipcode, tags, origin, sendMessageOn, number } = req.body;
-  const tagsArray = tags.map((tag) => {
-    return TAGS[tag];
-  });
+  const tagsArray = tags.map((tag) => TAGS[tag]);
   let transformedEmail = "";
   if (email && email.length > 0) {
-  transformedEmail = email.toLowerCase();
-}
+    transformedEmail = email.toLowerCase();
+  }
   const response = await Response.create({
     fullName,
     email: transformedEmail,
@@ -159,18 +154,15 @@ app.post("/response/create", async (req, res) => {
 
 app.post("/api/update-record", async (req, res) => {
   const { userId, isPaymentSuccess } = req.body;
-
   try {
     const updatedResponse = await Response.findOneAndUpdate(
       { userId },
       { isPaymentSuccess },
       { new: true }
     );
-
     if (!updatedResponse) {
       return res.status(404).json({ error: "Response not found" });
     }
-
     return res.status(200).json({ data: updatedResponse });
   } catch (error) {
     console.error("Error updating response:", error);
@@ -193,7 +185,6 @@ app.get("/check/offer", async (req, res) => {
 
 app.post("/email/submit", async (req, res) => {
   const { email, name, userId } = req.body;
-
   try {
     const response = await axios.post(
       "https://api.brevo.com/v3/contacts",
@@ -214,7 +205,6 @@ app.post("/email/submit", async (req, res) => {
         },
       }
     );
-
     res.status(200).json({ success: true, data: response.data });
   } catch (error) {
     console.error(error.response?.data || error.message);
@@ -222,90 +212,22 @@ app.post("/email/submit", async (req, res) => {
   }
 });
 
-// app.post("/response/create2", async (req, res) => {
-//   const { fullName, email, age, user_id, zipcode, tags } = req.body;
-//   const tagsArray = tags.map((tag) => {
-//     return TAGS[tag];
-//   });
-//   const transformedEmail = email.toLowerCase();
-//   const response = await Response2.create({
-//     fullName,
-//     email: transformedEmail,
-//     age,
-//     userId: user_id,
-//     zipCode: zipcode,
-//     tags: tagsArray,
-//   });
-//   return res.status(200).json({ data: response });
-// });
-
-// app.get("/response/all2", async (req, res) => {
-//   const response = await Response2.find({});
-//   return res.status(200).json({ data: response });
-// });
-
-// app.get("/check/offer2", async (req, res) => {
-//   const { name } = req.query;
-//   const response = await Response2.findOne({ fullName: name });
-//   return res.status(200).json({ data: response });
-// });
-
-// app.post("/email/submit2", async (req, res) => {
-//   const { email, name, userId } = req.body;
-
-//   try {
-//     const response = await axios.post(
-//       "https://api.brevo.com/v3/contacts",
-//       {
-//         email,
-//         attributes: {
-//           FIRSTNAME: name,
-//           LASTNAME: email,
-//           USER_ID: userId,
-//         },
-//         listIds: [5],
-//         updateEnabled: true,
-//       },
-//       {
-//         headers: {
-//           "api-key": process.env.BREVO_API_KEY,
-//           "Content-Type": "application/json",
-//         },
-//       }
-//     );
-
-//     res.status(200).json({ success: true, data: response.data });
-//   } catch (error) {
-//     console.error(error.response?.data || error.message);
-//     res.status(500).json({ success: false, error: error.response?.data });
-//   }
-// });
-
 app.get("/check/model", async (req, res) => {
   const { fullName } = req.query;
-
   if (!fullName) {
     return res.status(400).json({ error: "fullName is required in query" });
   }
-
   try {
     const results = [];
-
     const r1 = await Response.findOne({ fullName });
     if (r1) results.push("Response");
-
     const r2 = await Response2.findOne({ fullName });
     if (r2) results.push("Response2");
-
-   const r3 = await ChatbotResponse.findOne({ fullName });
+    const r3 = await ChatbotResponse.findOne({ fullName });
     if (r3) results.push("ChatbotResponse");
-
-
-
     if (results.length === 0) {
       return res.status(404).json({ message: "Not found in any model" });
     }
-
     return res.status(200).json({ foundIn: results });
   } catch (err) {
     console.error("Error in /check/model:", err);
@@ -327,8 +249,8 @@ app.post('/api/create-checkout', async (req, res) => {
         data: {
           type: 'checkouts',
           attributes: {
-            custom_price: 10,            // $1.00 in cents
-            checkout_options: { embed: true }, // or false for hosted
+            custom_price: 10, // note: Lemon uses cents; 100 would be $1.00
+            checkout_options: { embed: true },
             product_options: {
               redirect_url: process.env.AFTER_PAY_REDIRECT,
             },
@@ -341,23 +263,20 @@ app.post('/api/create-checkout', async (req, res) => {
       }),
     })
     const json = await resp.json()
- if (!json || !json.data || !json.data.attributes || !json.data.attributes.url) {
-  console.error('Invalid Lemon API response:', json);
-  return res.status(500).json({ error: 'Invalid Lemon API response' });
-}
-
-return res.json({ url: json.data.attributes.url });
-
+    if (!json || !json.data || !json.data.attributes || !json.data.attributes.url) {
+      console.error('Invalid Lemon API response:', json);
+      return res.status(500).json({ error: 'Invalid Lemon API response' });
+    }
+    return res.json({ url: json.data.attributes.url });
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'checkout creation failed' })
   }
 })
+
 app.post("/api/create-checkout-session", async (req, res) => {
   console.log("🎯 Stripe route hit");
-
   const { email, name, userId, amount } = req.body;
-
   try {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -378,59 +297,57 @@ app.post("/api/create-checkout-session", async (req, res) => {
       // customer_email: email,
       success_url: "https://mybenefitsai.org/success",
       cancel_url: "https://mybenefitsai.org/cancel",
-      metadata: {
-        userId,
-        name,
-      },
+      metadata: { userId, name },
     });
-
     console.log("✅ Stripe session created:", session.id);
     return res.status(200).json({ url: session.url });
-
   } catch (err) {
     console.error("❌ Stripe Error:", err.message);
     return res.status(500).json({ error: "Unable to create Stripe session", message: err.message });
   }
 });
 
+// ------------------------ NEW: RAG $1.00 USD PaymentIntent endpoints ------------------------
+let RAG_LAST_PI = null;
 
-// Lander third routess --->
+// Health (simple)
+app.get("/rag/health", (_req, res) => res.json({ ok: true }));
 
-// app.post("/email3", async (req, res) => {
-//   const { email } = req.body;
-//   const response = await Email.create({
-//     email,
-//   });
-//   return res.status(200).json({ data: response });
-// });
+// Create a fixed $1 PaymentIntent (USD)
+app.post("/rag/oneusd/create", async (_req, res) => {
+  try {
+    const intent = await stripe.paymentIntents.create({
+      amount: 100,                  // $1.00
+      currency: "usd",
+      automatic_payment_methods: { enabled: true }
+    });
+    RAG_LAST_PI = intent.id;
+    return res.json({ id: intent.id, clientSecret: intent.client_secret });
+  } catch (err) {
+    console.error("rag:oneusd:create error:", err?.message || err);
+    return res.status(500).json({ error: err?.message || "Server error" });
+  }
+});
 
-// app.post("/response/create3", async (req, res) => {
-//   const { fullName, email, age, user_id, zipcode, tags } = req.body;
-//   const tagsArray = tags.map((tag) => {
-//     return TAGS[tag];
-//   });
-//   const transformedEmail = email.toLowerCase();
-//   const response = await Response3.create({
-//     fullName,
-//     email: transformedEmail,
-//     age,
-//     userId: user_id,
-//     zipCode: zipcode,
-//     tags: tagsArray,
-//   });
-//   return res.status(200).json({ data: response });
-// });
+// Check PI status: uses ?id= to check any PI, or falls back to last created
+app.get("/rag/intent/status", async (req, res) => {
+  try {
+    const { id } = req.query;
+    const piId = id || RAG_LAST_PI;
+    if (!piId) return res.json({ status: "unknown" });
+    const pi = await stripe.paymentIntents.retrieve(piId);
+    return res.json({ id: pi.id, status: pi.status });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Server error" });
+  }
+});
+// --------------------------------------------------------------------------------------------
 
-// app.get("/response/all3", async (req, res) => {
-//   const response = await Response3.find({});
-//   return res.status(200).json({ data: response });
-// });
+// Stripe webhook (raw body)
 app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
   let event;
-
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
@@ -438,16 +355,13 @@ app.post("/webhook", async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // ✅ On payment success
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
-
     const { customer_email: email, metadata } = session;
     const { userId, name } = metadata;
 
     console.log("✅ Payment success for:", email);
 
-    // 1. Update DB to mark payment success
     try {
       await axios.post("https://benifit-gpt-be.onrender.com/api/update-record", {
         userId,
@@ -457,7 +371,6 @@ app.post("/webhook", async (req, res) => {
       console.error("❌ Failed to update record:", e.message);
     }
 
-    // 2. Send email via Brevo
     try {
       await axios.post("https://benifit-gpt-be.onrender.com/email/submit", {
         email,
@@ -471,7 +384,6 @@ app.post("/webhook", async (req, res) => {
 
   return res.status(200).json({ received: true });
 });
-
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
