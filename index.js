@@ -384,6 +384,147 @@ app.post("/webhook", async (req, res) => {
 
   return res.status(200).json({ received: true });
 });
+// ___ missing u farish noob 
+// --- ADD THIS NEAR YOUR OTHER REQUIRES ---
+const AnalyticsEvent = require("./analyticsEvent");
+
+// --- helper to get IP (works behind proxies if trust proxy is set) ---
+app.set('trust proxy', true);
+function getIp(req) {
+  return (
+    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+    req.socket?.remoteAddress ||
+    null
+  );
+}
+
+// ----------- ANALYTICS ROUTES -----------
+
+// Generic event endpoint (you can use this for everything)
+app.post("/analytics/event", async (req, res) => {
+  try {
+    const { type, page, buttonId, userId, sessionId, meta } = req.body || {};
+    if (!type) return res.status(400).json({ error: "type is required" });
+
+    const doc = await AnalyticsEvent.create({
+      type,
+      page: page || null,
+      buttonId: buttonId || null,
+      userId: userId || null,
+      sessionId: sessionId || null,
+      meta: meta || {},
+      ip: getIp(req),
+      ua: req.headers["user-agent"] || null,
+      referrer: req.headers["referer"] || req.headers["referrer"] || null,
+    });
+
+    return res.status(201).json({ ok: true, id: doc._id });
+  } catch (e) {
+    console.error("analytics/event error:", e);
+    return res.status(500).json({ error: "failed to create event" });
+  }
+});
+
+// Quick helpers (optional sugar):
+app.post("/analytics/pageview", async (req, res) => {
+  try {
+    const { page = "/", userId = null, sessionId = null, meta = {} } = req.body || {};
+    const doc = await AnalyticsEvent.create({
+      type: "page_view",
+      page,
+      userId,
+      sessionId,
+      meta,
+      ip: getIp(req),
+      ua: req.headers["user-agent"] || null,
+      referrer: req.headers["referer"] || req.headers["referrer"] || null,
+    });
+    return res.status(201).json({ ok: true, id: doc._id });
+  } catch (e) {
+    console.error("analytics/pageview error:", e);
+    return res.status(500).json({ error: "failed to log pageview" });
+  }
+});
+
+app.post("/analytics/button", async (req, res) => {
+  try {
+    const { page = "/", buttonId, userId = null, sessionId = null, meta = {} } = req.body || {};
+    if (!buttonId) return res.status(400).json({ error: "buttonId is required" });
+
+    const doc = await AnalyticsEvent.create({
+      type: "button_click",
+      page,
+      buttonId,
+      userId,
+      sessionId,
+      meta,
+      ip: getIp(req),
+      ua: req.headers["user-agent"] || null,
+      referrer: req.headers["referer"] || req.headers["referrer"] || null,
+    });
+    return res.status(201).json({ ok: true, id: doc._id });
+  } catch (e) {
+    console.error("analytics/button error:", e);
+    return res.status(500).json({ error: "failed to log button click" });
+  }
+});
+
+// Congrats page visit
+app.post("/analytics/congrats", async (req, res) => {
+  try {
+    const { userId = null, sessionId = null, meta = {} } = req.body || {};
+    const doc = await AnalyticsEvent.create({
+      type: "page_visit",
+      page: "/congratulations",
+      userId,
+      sessionId,
+      meta,
+      ip: getIp(req),
+      ua: req.headers["user-agent"] || null,
+      referrer: req.headers["referer"] || req.headers["referrer"] || null,
+    });
+    return res.status(201).json({ ok: true, id: doc._id });
+  } catch (e) {
+    console.error("analytics/congrats error:", e);
+    return res.status(500).json({ error: "failed to log congrats visit" });
+  }
+});
+
+// Simple summary (counts per page and per button, optional time filter)
+app.get("/analytics/summary", async (req, res) => {
+  try {
+    const { from, to } = req.query; // ISO strings optional
+    const match = {};
+    if (from || to) {
+      match.createdAt = {};
+      if (from) match.createdAt.$gte = new Date(from);
+      if (to) match.createdAt.$lte = new Date(to);
+    }
+
+    const [pages, buttons, totals] = await Promise.all([
+      AnalyticsEvent.aggregate([
+        { $match: match },
+        { $group: { _id: { type: "$type", page: "$page" }, count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      AnalyticsEvent.aggregate([
+        { $match: { ...match, type: "button_click" } },
+        { $group: { _id: { page: "$page", buttonId: "$buttonId" }, count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      AnalyticsEvent.aggregate([
+        { $match: match },
+        { $group: { _id: "$type", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+    ]);
+
+    res.json({ totals, pages, buttons });
+  } catch (e) {
+    console.error("analytics/summary error:", e);
+    res.status(500).json({ error: "failed to get summary" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
