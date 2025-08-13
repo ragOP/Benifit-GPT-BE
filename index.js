@@ -4,7 +4,7 @@ const app = express();
 const Stripe = require("stripe");
 require("dotenv").config();
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 9005;
 const cors = require("cors");
 
 const UserResponse = require("./userResponse");
@@ -17,11 +17,12 @@ const Response3 = require("./response3");
 
 // (kept) Stripe init; added apiVersion for stability
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
-
+const twilioRoutes = require("./twilioRoutes");
 // Webhook must get raw body
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(cors());
+app.use("/api/notify", twilioRoutes);
 
 (async () => {
   await connectToDatabase();
