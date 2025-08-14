@@ -178,11 +178,23 @@ app.get("/response/all", async (req, res) => {
 });
 
 app.get("/check/offer", async (req, res) => {
-  const { name } = req.query;
-  const response = await Response.findOne({
-    fullName: new RegExp(`^${name}\\s*$`),
-  });
-  return res.status(200).json({ data: response });
+  try {
+    const { name, userId } = req.query;
+
+    if (!name && !userId) {
+      return res.status(400).json({ error: "Provide either name or userId in query" });
+    }
+
+    const query = userId
+      ? { userId: String(userId) }
+      : { fullName: new RegExp(`^${String(name).trim()}\\s*$`, "i") };
+
+    const response = await Response.findOne(query);
+    return res.status(200).json({ data: response });
+  } catch (e) {
+    console.error("/check/offer error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
 });
 
 app.post("/email/submit", async (req, res) => {
