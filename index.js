@@ -527,6 +527,90 @@ app.get("/analytics/summary", async (req, res) => {
   }
 });
 
+
+// ========================= TrustedForm: BACKEND INTEGRATION =========================
+// Keep keys server-side only.
+// .env: TRUSTEDFORM_API_KEY=3eefd4424efd36643742f44765d28308
+
+// Validate cert URL is a TF certificate URL
+function isValidTfCertUrl(url) {
+  try {
+    const u = new URL(url);
+    // Most TF certs live at cert.trustedform.com
+    return u.hostname === "cert.trustedform.com";
+  } catch {
+    return false;
+  }
+}
+
+// Build Basic auth header: username "API", password = API key
+function tfAuthHeader() {
+  const key = process.env.TRUSTEDFORM_API_KEY;
+  if (!key) return null;
+  return "Basic " + Buffer.from(`API:${key}`).toString("base64");
+}
+
+// Simple ping to confirm server has the key
+app.get("/tf/health", (req, res) => {
+  res.json({ ok: !!process.env.TRUSTEDFORM_API_KEY });
+});
+
+// Claim/retain the certificate
+app.post("/tf/claim", async (req, res) => {
+  try {
+    const {
+      cert_url,
+      email,
+      phone,
+      reference,
+      vendor,
+      required_scan_terms,
+      forbidden_scan_terms
+    } = req.body || {};
+
+    if (!cert_url || !isValidTfCertUrl(cert_url)) {
+      return res.status(400).json({ success: false, error: "Invalid cert_url" });
+    }
+
+    const auth = tfAuthHeader();
+    if (!auth) {
+      return res.status(500).json({ success: false, error: "Missing TRUSTEDFORM_API_KEY" });
+    }
+
+    // Assemble optional body fields
+    const body = {
+      email_1: email || undefined,
+      phone_1: phone || undefined,
+      reference: reference || undefined,
+      vendor: vendor || undefined,
+      required_scan_terms: required_scan_terms || undefined,
+      forbidden_scan_terms: forbidden_scan_terms || undefined,
+    };
+
+    // POST to the cert URL to claim/retain it
+    const tfResp = await axios.post(cert_url, body, {
+      headers: {
+        Authorization: auth,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        // Optionally: "Api-Version": "4.0",
+      },
+      timeout: 10000,
+      validateStatus: () => true, // we'll forward the status back
+    });
+
+    return res.status(tfResp.status).json({
+      success: tfResp.status >= 200 && tfResp.status < 300,
+      data: tfResp.data,
+    });
+  } catch (err) {
+    console.error("TF claim error:", err?.response?.data || err?.message || err);
+    return res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+// ======================= End TrustedForm: BACKEND INTEGRATION =======================
+
+
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
