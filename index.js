@@ -180,26 +180,36 @@ app.get("/response/all", async (req, res) => {
 app.get("/check/offer", async (req, res) => {
   try {
     const { name } = req.query; // keep ?name= syntax
-    if (!name) {
+    if (!name || typeof name !== "string") {
       return res.status(400).json({ error: "name is required in query" });
     }
 
-    let query;
-    // If the value looks like a Mongo ObjectId or custom userId format → search by userId
-    if (/^[a-zA-Z0-9_-]{6,}$/.test(name)) {
-      query = { userId: String(name) };
-    } else {
-      // Else treat as a fullName search
-      query = { fullName: new RegExp(`^${String(name).trim()}\\s*$`, "i") };
+    const value = String(name).trim();
+
+    // Helper to escape regex specials in user-provided text
+    const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // 1) Try exact userId match (short or long, any length)
+    let doc = await Response.findOne({ userId: value });
+
+    // 2) If not found, try exact fullName match (case-insensitive; ignores trailing spaces)
+    if (!doc) {
+      doc = await Response.findOne({
+        fullName: new RegExp("^" + escapeRegex(value) + "\\s*$", "i"),
+      });
     }
 
-    const response = await Response.findOne(query);
-    return res.status(200).json({ data: response });
+    // 3) Return result (or 404 if nothing)
+    if (!doc) {
+      return res.status(404).json({ error: "No offer found for provided name/userId" });
+    }
+    return res.status(200).json({ data: doc });
   } catch (e) {
     console.error("/check/offer error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 
 
