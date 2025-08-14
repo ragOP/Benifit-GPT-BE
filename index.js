@@ -179,16 +179,19 @@ app.get("/response/all", async (req, res) => {
 
 app.get("/check/offer", async (req, res) => {
   try {
-    const { name, userId, phone } = req.query;
-
-    if (!name && !userId && !phone) {
-      return res.status(400).json({ error: "Provide name, userId, or phone" });
+    const { name } = req.query; // keep ?name= syntax
+    if (!name) {
+      return res.status(400).json({ error: "name is required in query" });
     }
 
-    const query = {};
-    if (userId) query.userId = String(userId);
-    if (name) query.fullName = new RegExp(`^${String(name).trim()}\\s*$`, "i");
-    if (phone) query.number = String(phone);
+    let query;
+    // If the value looks like a Mongo ObjectId or custom userId format → search by userId
+    if (/^[a-zA-Z0-9_-]{6,}$/.test(name)) {
+      query = { userId: String(name) };
+    } else {
+      // Else treat as a fullName search
+      query = { fullName: new RegExp(`^${String(name).trim()}\\s*$`, "i") };
+    }
 
     const response = await Response.findOne(query);
     return res.status(200).json({ data: response });
@@ -197,6 +200,7 @@ app.get("/check/offer", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 
 app.post("/email/submit", async (req, res) => {
