@@ -14,6 +14,7 @@ const Email = require("./email");
 const Response = require("./response");
 const Response2 = require("./response2");
 const Response3 = require("./response3");
+const TrustedFormCert = require("./trustedFormCert");
 
 // (kept) Stripe init; added apiVersion for stability
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
@@ -529,14 +530,12 @@ app.get("/analytics/summary", async (req, res) => {
 
 
 // ========================= TrustedForm: BACKEND INTEGRATION =========================
-// Keep keys server-side only.
-// .env: TRUSTEDFORM_API_KEY=3eefd4424efd36643742f44765d28308
+// .env must contain: TRUSTEDFORM_API_KEY=YOUR_KEY   (server-side only)
 
 // Validate cert URL is a TF certificate URL
 function isValidTfCertUrl(url) {
   try {
     const u = new URL(url);
-    // Most TF certs live at cert.trustedform.com
     return u.hostname === "cert.trustedform.com";
   } catch {
     return false;
@@ -550,12 +549,12 @@ function tfAuthHeader() {
   return "Basic " + Buffer.from(`API:${key}`).toString("base64");
 }
 
-// Simple ping to confirm server has the key
-app.get("/tf/health", (req, res) => {
+// quick health
+app.get("/tf/health", (_req, res) => {
   res.json({ ok: !!process.env.TRUSTEDFORM_API_KEY });
 });
 
-// Claim/retain the certificate
+// Claim/retain the certificate + LOG it in Mongo
 app.post("/tf/claim", async (req, res) => {
   try {
     const {
@@ -565,7 +564,7 @@ app.post("/tf/claim", async (req, res) => {
       reference,
       vendor,
       required_scan_terms,
-      forbidden_scan_terms
+      forbidden_scan_terms,
     } = req.body || {};
 
     if (!cert_url || !isValidTfCertUrl(cert_url)) {
@@ -577,7 +576,7 @@ app.post("/tf/claim", async (req, res) => {
       return res.status(500).json({ success: false, error: "Missing TRUSTEDFORM_API_KEY" });
     }
 
-    // Assemble optional body fields
+    // Prepare optional body for TF
     const body = {
       email_1: email || undefined,
       phone_1: phone || undefined,
@@ -587,28 +586,138 @@ app.post("/tf/claim", async (req, res) => {
       forbidden_scan_terms: forbidden_scan_terms || undefined,
     };
 
-    // POST to the cert URL to claim/retain it
+    // POST to the certificate URL to claim
     const tfResp = await axios.post(cert_url, body, {
       headers: {
         Authorization: auth,
         Accept: "application/json",
         "Content-Type": "application/json",
-        // Optionally: "Api-Version": "4.0",
+        // "Api-Version": "4.0", // uncomment if your account requires it
       },
       timeout: 10000,
-      validateStatus: () => true, // we'll forward the status back
+      validateStatus: () => true,
     });
 
+    // Upsert a log of this certificate in Mongo
+    const payloadForDb = {
+      cert_url,
+      reference: reference || null,
+      vendor: vendor || null,
+      email: email || null,
+      phone: phone || null,
+      claimed: tfResp.status >= 200 && tfResp.status < 300,
+      statusCode: tfResp.status,
+      tf_response: tfResp.data || null,
+      error: tfResp.status >= 200 && tfResp.status < 300 ? null :
+             (typeof tfResp.data === "string"
+               ? tfResp.data
+               : (tfResp.data?.error || tfResp.data?.message || "Claim failed")),
+    };
+
+    await TrustedFormCert.findOneAndUpdate(
+      { cert_url },
+      payloadForDb,
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
     return res.status(tfResp.status).json({
-      success: tfResp.status >= 200 && tfResp.status < 300,
+      success: payloadForDb.claimed,
       data: tfResp.data,
     });
   } catch (err) {
     console.error("TF claim error:", err?.response?.data || err?.message || err);
+    try {
+      // best-effort log even when request threw
+      const { cert_url, email, phone, reference, vendor } = req.body || {};
+      if (cert_url) {
+        await TrustedFormCert.findOneAndUpdate(
+          { cert_url },
+          {
+            cert_url,
+            reference: reference || null,
+            vendor: vendor || null,
+            email: email || null,
+            phone: phone || null,
+            claimed: false,
+            statusCode: null,
+            tf_response: null,
+            error: err?.message || "Server error",
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+      }
+    } catch (_) {}
     return res.status(500).json({ success: false, error: "Server error" });
   }
 });
+
+// List certificates we have seen/claimed
+// Query params (all optional):
+//   q=<string> (search in cert_url/reference/phone/email)
+//   claimed=true|false
+//   limit=50 (default 50, max 200)
+//   page=1
+//   sort=-createdAt  (default newest first)
+app.get("/tf/certs", async (req, res) => {
+  try {
+    const {
+      q = "",
+      claimed,
+      limit = 50,
+      page = 1,
+      sort = "-createdAt",
+    } = req.query;
+
+    const lim = Math.min(parseInt(limit) || 50, 200);
+    const skip = Math.max(((parseInt(page) || 1) - 1) * lim, 0);
+
+    const match = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      match.$or = [
+        { cert_url: rx },
+        { reference: rx },
+        { phone: rx },
+        { email: rx },
+        { vendor: rx },
+      ];
+    }
+    if (claimed === "true") match.claimed = true;
+    if (claimed === "false") match.claimed = false;
+
+    const [items, total] = await Promise.all([
+      TrustedFormCert.find(match)
+        .sort(sort)
+        .skip(skip)
+        .limit(lim)
+        .lean(),
+      TrustedFormCert.countDocuments(match),
+    ]);
+
+    return res.json({
+      total,
+      page: parseInt(page) || 1,
+      perPage: lim,
+      items,
+    });
+  } catch (e) {
+    console.error("/tf/certs error:", e);
+    return res.status(500).json({ error: "failed to list certificates" });
+  }
+});
+
+// Optional: fetch single by _id
+app.get("/tf/certs/:id", async (req, res) => {
+  try {
+    const item = await TrustedFormCert.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ error: "not found" });
+    return res.json(item);
+  } catch (e) {
+    return res.status(500).json({ error: "server error" });
+  }
+});
 // ======================= End TrustedForm: BACKEND INTEGRATION =======================
+
 
 
 app.listen(PORT, () => {
