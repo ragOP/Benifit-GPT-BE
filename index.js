@@ -63,20 +63,11 @@ function buildImmediateMessage(fullName = "User", userId = "TEST123") {
   );
 }
 
-// Optionally, build a single follow-up line based on what they qualify for.
-// (You can pick the highest-priority tag; here we just join a couple)
 function buildFollowupLine(tags = [], userId = "TEST123") {
   const link = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
-
-  // prefer Medicare / Debt / MVA / Auto / Reverse Mortgage / SSDI
   const priority = ["Medicare", "Debt", "MVA", "Auto", "Reverse Mortgage", "SSDI"];
   const found = priority.find((t) => tags.includes(t));
-
-  if (found && TEMPLATE_MAP[found]) {
-    return TEMPLATE_MAP[found].replace("[link]", link);
-  }
-
-  // fallback generic
+  if (found && TEMPLATE_MAP[found]) return TEMPLATE_MAP[found].replace("[link]", link);
   return `Benefits are still unclaimed. Finish here: ${link} Reply STOP to opt out.`;
 }
 
@@ -91,7 +82,6 @@ app.post("/nudges/init", async (req, res) => {
       return res.status(400).json({ error: "userId and to are required" });
     }
 
-    // upsert (if user revisits, keep existing sendCount)
     const now = new Date();
     const plan = await Nudge.findOneAndUpdate(
       { userId },
@@ -106,8 +96,7 @@ app.post("/nudges/init", async (req, res) => {
           maxSends: 5,
           sendCount: 0,
           lastSentAt: null,
-          // first schedule time: now + 90m
-          nextAt: new Date(now.getTime() + 90 * 60 * 1000),
+          nextAt: new Date(now.getTime() + 90 * 60 * 1000), // first due 90m
           stopped: false,
           stopReason: null,
         },
@@ -116,18 +105,19 @@ app.post("/nudges/init", async (req, res) => {
     ).lean();
 
     const immediateMessage = buildImmediateMessage(fullName, userId);
-
     return res.json({
       ok: true,
       immediateMessage,
       plan: {
         userId: plan.userId,
         to: plan.to,
-        nextAt: plan.nextAt,
+        fullName: plan.fullName,
+        tags: plan.tags,
+        sendCount: plan.sendCount,
+        maxSends: plan.maxSends,
         firstDelayMin: plan.firstDelayMin,
         intervalMin: plan.intervalMin,
-        maxSends: plan.maxSends,
-        sendCount: plan.sendCount,
+        nextAt: plan.nextAt,
         stopped: plan.stopped,
       },
     });
@@ -156,12 +146,12 @@ app.get("/nudges/status", async (req, res) => {
         tags: n.tags,
         sendCount: n.sendCount,
         maxSends: n.maxSends,
+        firstDelayMin: n.firstDelayMin,
+        intervalMin: n.intervalMin,
         nextAt: n.nextAt,
         lastSentAt: n.lastSentAt,
         stopped: n.stopped,
         stopReason: n.stopReason,
-        firstDelayMin: n.firstDelayMin,
-        intervalMin: n.intervalMin,
       },
     });
   } catch (e) {
@@ -956,6 +946,11 @@ app.post("/progress", async (req, res) => {
       return res.status(400).json({ error: "userId is required" });
     }
 
+    // fetch old state to compare (for stopping nudges)
+    const old = await ProgressState.findOne({ userId }).lean();
+
+    // normalize new inputs
+    const normalizeBoolArray = (arr) => (Array.isArray(arr) ? arr.map(Boolean) : []);
     completed = normalizeBoolArray(completed);
     unlockedCount = Number.isFinite(+unlockedCount) ? Math.max(0, +unlockedCount) : 1;
     activeIndex = Number.isFinite(+activeIndex) ? Math.max(0, +activeIndex) : 0;
@@ -966,6 +961,19 @@ app.post("/progress", async (req, res) => {
       { $set: { completed, unlockedCount, activeIndex, benefits } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
+
+    // if the user moved forward, stop any scheduled nudges
+    const progressed =
+      (old && (Number(activeIndex) > Number(old?.activeIndex) ||
+               Number(unlockedCount) > Number(old?.unlockedCount))) ||
+      (!old && (activeIndex > 0 || unlockedCount > 1));
+
+    if (progressed) {
+      await Nudge.findOneAndUpdate(
+        { userId, stopped: false },
+        { $set: { stopped: true, stopReason: "progress" } }
+      ).catch(() => {});
+    }
 
     return res.status(200).json({
       ok: true,
@@ -983,6 +991,7 @@ app.post("/progress", async (req, res) => {
     return res.status(500).json({ error: "server error" });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
