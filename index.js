@@ -21,6 +21,7 @@ const { buildStepMessage, buildCombinedFirstMessage } = require("./utils/message
 // NEW: persist tab progress
 const ProgressState = require("./progressState");
 const SmsLog = require("./smsLog");
+const Nudge = require("./nudge");
 
 // ---------- Twilio (for /notify/sms in this file) ----------
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
@@ -32,13 +33,142 @@ const twilioEnabled = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
 const MINUTE = 60 * 1000;
 const FIRST_GAP_MS = 90 * MINUTE; // 90 minutes for the first nudge
 const REPEAT_GAP_MS = 30 * MINUTE; // 30 minutes thereafter
-
+const TEMPLATE_MAP = {
+  Medicare:
+    "Your $168/mo Food Allowance Card is waiting. Claim it now for groceries, gas, or rent: [link] Reply STOP to opt out.",
+  Debt:
+    "You’re approved for 100% debt relief, still unclaimed. Claim it here before it’s gone: [link] Reply STOP to opt out.",
+  MVA:
+    "Up to $100,000 accident payout unclaimed. Secure your benefit now: [link] Reply STOP to opt out.",
+  Auto:
+    "Discounted auto insurance with same coverage is waiting. Lock in your savings: [link] Reply STOP to opt out.",
+  "Reverse Mortgage":
+    "Approved for $100,000 homeowner payout, but unclaimed. Claim it today: [link] Reply STOP to opt out.",
+  SSDI:
+    "Your SSDI benefit (worth up to $4,018/mo) is unclaimed. Secure it today: [link] Reply STOP to opt out.",
+  // extra combined health + groceries line from your list
+  HealthGroceries:
+    "Free health coverage + $500/mo grocery allowance still unclaimed. Activate now: [link] Reply STOP to opt out.",
+};
 function computeNextAt(attempts, from = Date.now()) {
   // attempts = how many nudges already sent for this step
   // nextAt is either first gap (90m) if attempts===0, else +30m
   return new Date(from + (attempts === 0 ? FIRST_GAP_MS : REPEAT_GAP_MS));
 }
+function buildImmediateMessage(fullName = "User", userId = "TEST123") {
+  const link = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
+  return (
+    `Hey ${fullName}! You are eligible for benefits we found for you. Start here: ${link}\n` +
+    `Texts are optional. Reply STOP to opt out, HELP for help. Msg & data rates may apply.`
+  );
+}
 
+// Optionally, build a single follow-up line based on what they qualify for.
+// (You can pick the highest-priority tag; here we just join a couple)
+function buildFollowupLine(tags = [], userId = "TEST123") {
+  const link = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
+
+  // prefer Medicare / Debt / MVA / Auto / Reverse Mortgage / SSDI
+  const priority = ["Medicare", "Debt", "MVA", "Auto", "Reverse Mortgage", "SSDI"];
+  const found = priority.find((t) => tags.includes(t));
+
+  if (found && TEMPLATE_MAP[found]) {
+    return TEMPLATE_MAP[found].replace("[link]", link);
+  }
+
+  // fallback generic
+  return `Benefits are still unclaimed. Finish here: ${link} Reply STOP to opt out.`;
+}
+
+// POST /nudges/init
+// body: { userId, to, fullName, tags }
+// - stores/updates a Nudge plan for this user
+// - returns { ok, immediateMessage, plan }
+app.post("/nudges/init", async (req, res) => {
+  try {
+    const { userId, to, fullName = "User", tags = [] } = req.body || {};
+    if (!userId || !to) {
+      return res.status(400).json({ error: "userId and to are required" });
+    }
+
+    // upsert (if user revisits, keep existing sendCount)
+    const now = new Date();
+    const plan = await Nudge.findOneAndUpdate(
+      { userId },
+      {
+        $setOnInsert: {
+          userId,
+          to,
+          fullName,
+          tags,
+          firstDelayMin: 90,
+          intervalMin: 30,
+          maxSends: 5,
+          sendCount: 0,
+          lastSentAt: null,
+          // first schedule time: now + 90m
+          nextAt: new Date(now.getTime() + 90 * 60 * 1000),
+          stopped: false,
+          stopReason: null,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    const immediateMessage = buildImmediateMessage(fullName, userId);
+
+    return res.json({
+      ok: true,
+      immediateMessage,
+      plan: {
+        userId: plan.userId,
+        to: plan.to,
+        nextAt: plan.nextAt,
+        firstDelayMin: plan.firstDelayMin,
+        intervalMin: plan.intervalMin,
+        maxSends: plan.maxSends,
+        sendCount: plan.sendCount,
+        stopped: plan.stopped,
+      },
+    });
+  } catch (e) {
+    console.error("/nudges/init error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+// GET /nudges/status?userId=...
+app.get("/nudges/status", async (req, res) => {
+  try {
+    const { userId } = req.query || {};
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    const n = await Nudge.findOne({ userId }).lean();
+    if (!n) return res.json({ ok: true, found: false });
+
+    return res.json({
+      ok: true,
+      found: true,
+      plan: {
+        userId: n.userId,
+        to: n.to,
+        fullName: n.fullName,
+        tags: n.tags,
+        sendCount: n.sendCount,
+        maxSends: n.maxSends,
+        nextAt: n.nextAt,
+        lastSentAt: n.lastSentAt,
+        stopped: n.stopped,
+        stopReason: n.stopReason,
+        firstDelayMin: n.firstDelayMin,
+        intervalMin: n.intervalMin,
+      },
+    });
+  } catch (e) {
+    console.error("/nudges/status error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
 let twilioClient = null;
 if (twilioEnabled) {
   const twilio = require("twilio");
