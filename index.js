@@ -329,14 +329,14 @@ try {
   // send if due
   if (task.nextAt && task.nextAt.getTime() > now) return;
 
-  const text = buildStepMessage({
+  const texts = buildStepMessage({
     fullName: task.fullName,
     benefitKey: task.benefitKey,
     claimUrl : task.claimUrl,
   });
 
   try {
-    const sid = await sendViaLocalTwilio(task.to, text);
+    const sid = await sendViaLocalTwilio(task.to, texts);
     const attempts = task.attempts + 1;
 
     if (attempts >= (task.maxAttempts || 5)) {
