@@ -16,6 +16,9 @@ const Response2 = require("./response2");
 const Response3 = require("./response3");
 const TrustedFormCert = require("./trustedFormCert");
 
+// NEW: persist tab progress
+const ProgressState = require("./progressState");
+
 // (kept) Stripe init; added apiVersion for stability
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
 const twilioRoutes = require("./twilioRoutes");
@@ -34,11 +37,11 @@ app.post("/api/messages", async (req, res) => {
 
   console.log("Request body:", req.body);
   console.log("Qualified For:", qualifiedFor);
-  console.log("Qualified For keys:", Object.keys(qualifiedFor));
+  console.log("Qualified For keys:", Object.keys(qualifiedFor || {}));
   console.log("User ID:", userId);
 
   let isQualified = false;
-  if (Object.keys(qualifiedFor).length > 0) {
+  if (qualifiedFor && Object.keys(qualifiedFor).length > 0) {
     isQualified = true;
   }
 
@@ -49,7 +52,7 @@ app.post("/api/messages", async (req, res) => {
   const responses = await UserResponse.create({
     userId: userId,
     responses: replies,
-    qualifiedFor: qualifiedFor,
+    qualifiedFor: qualifiedFor || {},
     isQualified: isQualified,
   });
   if (!responses) {
@@ -135,7 +138,7 @@ const TAGS = {
 
 app.post("/response/create", async (req, res) => {
   const { fullName, email, age, user_id, zipcode, tags, origin, sendMessageOn, number } = req.body;
-  const tagsArray = tags.map((tag) => TAGS[tag]);
+  const tagsArray = (tags || []).map((tag) => TAGS[tag]).filter(Boolean);
   let transformedEmail = "";
   if (email && email.length > 0) {
     transformedEmail = email.toLowerCase();
@@ -210,9 +213,6 @@ app.get("/check/offer", async (req, res) => {
   }
 });
 
-
-
-
 app.post("/email/submit", async (req, res) => {
   const { email, name, userId } = req.body;
   try {
@@ -286,8 +286,8 @@ app.post('/api/create-checkout', async (req, res) => {
             },
           },
           relationships: {
-            store: { data: { type: 'stores', id: process.env.STORE_ID.toString() } },
-            variant: { data: { type: 'variants', id: variantId.toString() } },
+            store: { data: { type: 'stores', id: process.env.STORE_ID?.toString() } },
+            variant: { data: { type: 'variants', id: variantId?.toString() } },
           },
         },
       }),
@@ -414,6 +414,7 @@ app.post("/webhook", async (req, res) => {
 
   return res.status(200).json({ received: true });
 });
+
 // ___ missing u farish noob 
 // --- ADD THIS NEAR YOUR OTHER REQUIRES ---
 const AnalyticsEvent = require("./analyticsEvent");
@@ -746,6 +747,95 @@ app.get("/tf/certs/:id", async (req, res) => {
 });
 // ======================= End TrustedForm: BACKEND INTEGRATION =======================
 
+
+
+/* =========================
+ * NEW: PROGRESS MEMORY API
+ * =========================
+ * Frontend expects:
+ *  - GET  /progress?userId=...
+ *  - POST /progress   body { userId, completed, unlockedCount, activeIndex, benefits? }
+ */
+function normalizeBoolArray(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((v) => !!v);
+}
+
+app.get("/progress", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId || typeof userId !== "string") {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    const doc = await ProgressState.findOne({ userId }).lean();
+    if (!doc) {
+      // sensible defaults if none saved yet
+      return res.json({
+        userId,
+        completed: [],
+        unlockedCount: 1,
+        activeIndex: 0,
+        benefits: [],
+      });
+    }
+
+    return res.json({
+      userId: doc.userId,
+      completed: doc.completed || [],
+      unlockedCount: typeof doc.unlockedCount === "number" ? doc.unlockedCount : 1,
+      activeIndex: typeof doc.activeIndex === "number" ? doc.activeIndex : 0,
+      benefits: doc.benefits || [],
+      updatedAt: doc.updatedAt,
+    });
+  } catch (e) {
+    console.error("/progress GET error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+app.post("/progress", async (req, res) => {
+  try {
+    let { userId, completed, unlockedCount, activeIndex, benefits } = req.body || {};
+
+    if (!userId || typeof userId !== "string") {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    completed = normalizeBoolArray(completed);
+    unlockedCount = Number.isFinite(+unlockedCount) ? Math.max(0, +unlockedCount) : 1;
+    activeIndex = Number.isFinite(+activeIndex) ? Math.max(0, +activeIndex) : 0;
+    benefits = Array.isArray(benefits) ? benefits.map(String) : [];
+
+    const doc = await ProgressState.findOneAndUpdate(
+      { userId },
+      {
+        $set: {
+          completed,
+          unlockedCount,
+          activeIndex,
+          benefits,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        userId: doc.userId,
+        completed: doc.completed,
+        unlockedCount: doc.unlockedCount,
+        activeIndex: doc.activeIndex,
+        benefits: doc.benefits,
+        updatedAt: doc.updatedAt,
+      },
+    });
+  } catch (e) {
+    console.error("/progress POST error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
 
 
 app.listen(PORT, () => {
