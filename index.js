@@ -425,53 +425,107 @@ app.get("/nudges/overview", async (req, res) => {
     return res.status(500).json({ error: "server error" });
   }
 });
-// GET /nudges/tasks?status=active&dueOnly=true&limit=50
+
+// ===== All-task listing, search, pagination =====
 app.get("/nudges/tasks", async (req, res) => {
   try {
-    const { userId, status, dueOnly, limit = 50 } = req.query || {};
-    const q = {};
-    if (userId) q.userId = userId;
-    if (status) q.status = status;
-    if (dueOnly === "true") q.nextAt = { $lte: new Date() };
+    const {
+      q = "",                 // free-text search across userId, to, fullName, benefitKey
+      status,                 // optional: active | done | paused (if you use paused)
+      page = 1,
+      limit = 25,
+      sort = "-nextAt",       // default: newest due first; examples: "-updatedAt", "userId"
+    } = req.query;
 
-    const tasks = await NudgeTask.find(q).sort({ nextAt: 1 }).limit(Math.min(+limit || 50, 200)).lean();
-    return res.json({ ok: true, count: tasks.length, tasks });
+    const lim = Math.min(parseInt(limit) || 25, 200);
+    const skip = Math.max(((parseInt(page) || 1) - 1) * lim, 0);
+
+    const find = {};
+    if (status) find.status = status;
+
+    if (q) {
+      const rx = new RegExp(String(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      find.$or = [
+        { userId: rx },
+        { to: rx },
+        { fullName: rx },
+        { benefitKey: rx },
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      NudgeTask.find(find).sort(sort).skip(skip).limit(lim).lean(),
+      NudgeTask.countDocuments(find),
+    ]);
+
+    res.json({ ok: true, total, page: parseInt(page) || 1, perPage: lim, items });
   } catch (e) {
-    console.error("/nudges/tasks error:", e);
-    return res.status(500).json({ error: "server error" });
+    console.error("/nudges/tasks list error:", e);
+    res.status(500).json({ error: "server error" });
   }
 });
-// GET /nudges/logs?userId=TEST123
-// GET /nudges/logs?taskId=<ObjectId>
-app.get("/nudges/logs", async (req, res) => {
-  try {
-    const { userId, taskId, limit = 200 } = req.query || {};
-    const q = {};
-    if (userId) q.userId = userId;
-    if (taskId) q["meta.taskId"] = taskId;
 
-    const logs = await SmsLog.find(q).sort({ createdAt: -1 }).limit(Math.min(+limit || 200, 500)).lean();
-    return res.json({ ok: true, count: logs.length, logs });
-  } catch (e) {
-    console.error("/nudges/logs error:", e);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-// PATCH /nudges/tasks?id=<taskId>  body: { nextAt?: ISOstring }
+// ===== Quick: mark a task due NOW or change status =====
+// PATCH /nudges/tasks?id=<taskId>
+// body can include: { nextAt: <ISOString>, status: "active"|"done"|"paused", maxAttempts, repeatGapMs, firstGapMs }
 app.patch("/nudges/tasks", async (req, res) => {
   try {
     const { id } = req.query || {};
     if (!id) return res.status(400).json({ error: "id is required" });
+
     const update = {};
-    if (req.body?.nextAt) update.nextAt = new Date(req.body.nextAt);
+    if (req.body?.nextAt)      update.nextAt      = new Date(req.body.nextAt);
+    if (req.body?.status)      update.status      = String(req.body.status);
+    if (Number.isFinite(+req.body?.maxAttempts)) update.maxAttempts = Math.max(1, +req.body.maxAttempts);
+    if (Number.isFinite(+req.body?.repeatGapMs)) update.repeatGapMs = Math.max(1000, +req.body.repeatGapMs);
+    if (Number.isFinite(+req.body?.firstGapMs))  update.firstGapMs  = Math.max(1000, +req.body.firstGapMs);
+
     const doc = await NudgeTask.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
     if (!doc) return res.status(404).json({ error: "task not found" });
+
     return res.json({ ok: true, task: doc });
   } catch (e) {
     console.error("/nudges/tasks PATCH error:", e);
     return res.status(500).json({ error: "server error" });
   }
 });
+
+// ===== Force-run all currently due tasks (handy button) =====
+app.post("/nudges/flush-due", async (req, res) => {
+  try {
+    const limit = Number(req.body?.limit) || 50;
+    const now = new Date();
+    const due = await NudgeTask.find({ status: "active", nextAt: { $lte: now } })
+      .sort({ nextAt: 1 })
+      .limit(limit)
+      .lean();
+
+    let processed = 0;
+    for (const t of due) {
+      await handleTaskSend(t);
+      processed++;
+    }
+    return res.json({ ok: true, processed });
+  } catch (e) {
+    console.error("/nudges/flush-due error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+// ===== Recent SMS logs (optional, all users) =====
+// Shows the latest Twilio sends across everyone (if you want a feed)
+app.get("/sms/logs", async (req, res) => {
+  try {
+    const { limit = 50 } = req.query;
+    const lim = Math.min(parseInt(limit) || 50, 200);
+    const items = await SmsLog.find().sort({ createdAt: -1 }).limit(lim).lean();
+    return res.json({ ok: true, items });
+  } catch (e) {
+    console.error("/sms/logs error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
 
 // ====== PROGRESS ======
 app.get("/progress", async (req, res) => {
