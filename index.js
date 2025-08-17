@@ -111,8 +111,8 @@ async function sendSms({ to, body }){
 
 // nudge schedule
 const MINUTE = 60 * 1000;
-const FIRST_GAP_MS  = 90 * MINUTE; // first nudge gap after page visit
-const REPEAT_GAP_MS = 30 * MINUTE; // subsequent gaps
+const FIRST_GAP_MS  = 10 * MINUTE; // first nudge gap after page visit
+const REPEAT_GAP_MS = 10 * MINUTE; // subsequent gaps
 function computeNextAt(attempts, from = Date.now()){
   return new Date(from + (attempts === 0 ? FIRST_GAP_MS : REPEAT_GAP_MS));
 }
@@ -454,6 +454,21 @@ app.get("/nudges/logs", async (req, res) => {
     return res.json({ ok: true, count: logs.length, logs });
   } catch (e) {
     console.error("/nudges/logs error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+// PATCH /nudges/tasks?id=<taskId>  body: { nextAt?: ISOstring }
+app.patch("/nudges/tasks", async (req, res) => {
+  try {
+    const { id } = req.query || {};
+    if (!id) return res.status(400).json({ error: "id is required" });
+    const update = {};
+    if (req.body?.nextAt) update.nextAt = new Date(req.body.nextAt);
+    const doc = await NudgeTask.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
+    if (!doc) return res.status(404).json({ error: "task not found" });
+    return res.json({ ok: true, task: doc });
+  } catch (e) {
+    console.error("/nudges/tasks PATCH error:", e);
     return res.status(500).json({ error: "server error" });
   }
 });
