@@ -227,63 +227,103 @@ await NudgeTask.findOneAndUpdate(
   }
 });
 
-// worker: runs each 60s and sends due nudges until 5 attempts per step
 async function handleTaskSend(task) {
-  const now = Date.now();
+  const nowMs = Date.now();
   if (task.status !== "active") return;
 
-  // check user progress; if completed, create next step task & finish this one
-  const state = await ProgressState.findOne({ userId: task.userId }).lean().catch(() => null);
+  // 1) Read current progress
+  const state = await ProgressState.findOne({ userId: task.userId })
+    .lean()
+    .catch(() => null);
+
   const completed = Array.isArray(state?.completed) ? state.completed : [];
   const benefits  = Array.isArray(state?.benefits)  ? state.benefits  : [];
 
-- const hasStep   = task.stepIndex < benefits.length;
-+ // If we don't know benefits yet, DON'T finish the task. Keep sending as scheduled.
-+ const benefitsKnown = benefits.length > 0;
-+ const hasStep = benefitsKnown ? (task.stepIndex < benefits.length) : true;
+  // 2) If benefits are unknown, DO NOT finish this task. Keep sending as scheduled.
+  const benefitsKnown = benefits.length > 0;
 
-- if (!hasStep) {
-+ if (benefitsKnown && !hasStep) {
+  // When we do know benefits, the task is only valid if its stepIndex exists.
+  const hasStep = benefitsKnown ? (task.stepIndex < benefits.length) : true;
+
+  // If benefitsKnown and step doesn't exist anymore → finish this task.
+  if (benefitsKnown && !hasStep) {
     await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
     return;
   }
 
-- if (completed[task.stepIndex]) {
-+ if (benefitsKnown && completed[task.stepIndex]) {
+  // If benefitsKnown and this step is already completed → spawn next (if any) and finish this task.
+  if (benefitsKnown && completed[task.stepIndex]) {
     const nextIndex = task.stepIndex + 1;
+
     if (nextIndex < benefits.length) {
       const nextBenefitKey = String(benefits[nextIndex] || "");
       const nextClaim      = `https://mybenefitsai.org/claim/${encodeURIComponent(task.userId)}`;
+
       await NudgeTask.findOneAndUpdate(
         { userId: task.userId, stepIndex: nextIndex },
         {
           $setOnInsert: {
-            to: task.to, fullName: task.fullName,
-            benefitKey: nextBenefitKey, claimUrl: nextClaim,
-            status: "active", attempts: 0, maxAttempts: 5,
-            nextAt: computeNextAt(0, now),
+            to: task.to,
+            fullName: task.fullName,
+            benefitKey: nextBenefitKey,
+            claimUrl: nextClaim,
+            status: "active",
+            attempts: 0,
+            maxAttempts: 5,
+            nextAt: computeNextAt(0, nowMs),
           },
-          $set: { to: task.to, fullName: task.fullName, benefitKey: nextBenefitKey, claimUrl: nextClaim },
+          $set: {
+            to: task.to,
+            fullName: task.fullName,
+            benefitKey: nextBenefitKey,
+            claimUrl: nextClaim,
+          },
         },
         { upsert: true, new: true }
       );
     }
+
     await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
     return;
   }
 
+  // 3) Not completed → send when due
+  if (task.nextAt && task.nextAt.getTime() > nowMs) return; // not yet due
 
-setInterval(async () => {
+  const text = buildStepMessage({
+    fullName: task.fullName,
+    benefitKey: task.benefitKey,
+    claimUrl : task.claimUrl,
+  });
+
   try {
-    const now = new Date();
-    const due = await NudgeTask.find({ status: "active", nextAt: { $lte: now } })
-      .sort({ nextAt: 1 }).limit(50).lean();
-    for (const t of due) await handleTaskSend(t);
-  } catch (e) {
-    console.error("nudge worker error:", e);
+    await sendViaLocalTwilio(task.to, text);
+    const attempts = (task.attempts || 0) + 1;
+
+    if (attempts >= (task.maxAttempts || 5)) {
+      // Reached max tries — stop this task
+      await NudgeTask.findByIdAndUpdate(task._id, {
+        attempts,
+        lastSentAt: new Date(),
+        status: "done",
+      });
+    } else {
+      // Schedule next try (90m after first, then every 30m)
+      await NudgeTask.findByIdAndUpdate(task._id, {
+        attempts,
+        lastSentAt: new Date(),
+        nextAt: computeNextAt(attempts, nowMs),
+      });
+    }
+  } catch (err) {
+    console.error("nudge send failed:", err?.message || err);
+    // Back off 5 minutes on failure to avoid tight loop
+    await NudgeTask.findByIdAndUpdate(task._id, {
+      nextAt: new Date(nowMs + 5 * 60 * 1000),
+    });
   }
-}, 60 * 1000);
-// GET /nudges/overview?userId=TEST123
+}
+
 app.get("/nudges/overview", async (req, res) => {
   try {
     const { userId } = req.query || {};
