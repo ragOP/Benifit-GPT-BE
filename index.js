@@ -15,6 +15,8 @@ const Response = require("./response");
 const Response2 = require("./response2");
 const Response3 = require("./response3");
 const TrustedFormCert = require("./trustedFormCert");
+const NudgeTask = require("./nudgeTask");
+const { buildStepMessage, buildCombinedFirstMessage } = require("./utils/messageTemplates")
 
 // NEW: persist tab progress
 const ProgressState = require("./progressState");
@@ -25,6 +27,17 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN  || "";
 const TWILIO_FROM        = process.env.TWILIO_FROM        || ""; // e.g. +12345551234
 const twilioEnabled = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
+
+// schedule helpers
+const MINUTE = 60 * 1000;
+const FIRST_GAP_MS = 90 * MINUTE; // 90 minutes for the first nudge
+const REPEAT_GAP_MS = 30 * MINUTE; // 30 minutes thereafter
+
+function computeNextAt(attempts, from = Date.now()) {
+  // attempts = how many nudges already sent for this step
+  // nextAt is either first gap (90m) if attempts===0, else +30m
+  return new Date(from + (attempts === 0 ? FIRST_GAP_MS : REPEAT_GAP_MS));
+}
 
 let twilioClient = null;
 if (twilioEnabled) {
@@ -87,10 +100,7 @@ function makeDefaultMessage({ fullName = "Friend", userId = "unknown" }) {
 }
 /* -------------------------------------------------------------------- */
 
-// Avoid spamming: do not send if a message was sent in the last X minutes
-const SMS_COOLDOWN_MINUTES = 60;
-
-// ✅ This route is NOW after express.json(), so req.body will be parsed.
+// ✅ Cooldown REMOVED completely
 app.post("/notify/sms", async (req, res) => {
   try {
     const body = parseJsonBody(req);
@@ -117,24 +127,7 @@ app.post("/notify/sms", async (req, res) => {
         ? body.message.trim()
         : makeDefaultMessage({ fullName, userId });
 
-    // Optional cooldown by userId
-    if (userId && SmsLog) {
-      const since = new Date(Date.now() - SMS_COOLDOWN_MINUTES * 60 * 1000);
-      const recent = await SmsLog.findOne({ userId, createdAt: { $gte: since } })
-        .sort({ createdAt: -1 })
-        .lean()
-        .catch(() => null);
-      if (recent) {
-        return res.status(200).json({
-          ok: true,
-          message: "skipped due to cooldown",
-          cooldownMinutes: SMS_COOLDOWN_MINUTES,
-          last: { id: recent._id, at: recent.createdAt },
-        });
-      }
-    }
-
-    // Log queued
+    // Log queued (no cooldown check)
     let queuedId = null;
     if (SmsLog) {
       const queued = await SmsLog.create({
@@ -165,7 +158,7 @@ app.post("/notify/sms", async (req, res) => {
   }
 });
 
-// Optional: quickly check last SMS for a userId
+// Optional: quickly check last SMS for a userId (kept)
 app.get("/notify/sms/last", async (req, res) => {
   try {
     const { userId } = req.query || {};
@@ -191,6 +184,159 @@ app.get("/notify/sms/last", async (req, res) => {
 
 // (kept) Stripe init; added apiVersion for stability
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
+// POST /nudges/init
+// body: { userId, to, fullName, tags[] }  (tags e.g. ["Medicare","Debt","Auto"])
+app.post("/nudges/init", async (req, res) => {
+  try {
+    const { userId, to, fullName = "User", tags = [] } = req.body || {};
+    if (!userId || !to) {
+      return res.status(400).json({ error: "userId and to are required" });
+    }
+
+    const claimUrl = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
+    const benefitKey = Array.isArray(tags) && tags.length ? String(tags[0]) : "";
+
+    // create/upsert step 0 task (do not send now; due in 90m)
+    const nextAt = computeNextAt(0);
+    await NudgeTask.findOneAndUpdate(
+      { userId, stepIndex: 0 },
+      {
+        $setOnInsert: {
+          to, fullName, benefitKey, claimUrl,
+          status: "active",
+          attempts: 0,
+          maxAttempts: 5,
+          nextAt,
+        },
+        $set: { to, fullName, benefitKey, claimUrl },
+      },
+      { upsert: true, new: true }
+    );
+
+    // return the immediate “combined” message for FE to send right away
+    const combined = buildCombinedFirstMessage({ userId, fullName });
+    return res.json({ ok: true, immediateMessage: combined });
+  } catch (e) {
+    console.error("/nudges/init error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+async function sendViaLocalTwilio(to, message, meta = {}) {
+  // uses your existing /notify/sms logic in-process for consistency
+  // you already have twilioClient; we’ll reuse the same low-level helper:
+  // (if you prefer the route call, replace with axios.post to /notify/sms)
+  const { sid } = await (async () => {
+    // low-level sender you defined earlier:
+    const msg = await twilioClient.messages.create({
+      to,
+      from: TWILIO_FROM,
+      body: message,
+    });
+    return { sid: msg.sid };
+  })();
+  return sid;
+}
+
+async function handleTaskSend(task) {
+  const now = Date.now();
+  if (task.status !== "active") return;
+
+  // check user progress — if step is already completed, close and create next step
+  const state = await ProgressState.findOne({ userId: task.userId }).lean().catch(() => null);
+  const completed = Array.isArray(state?.completed) ? state.completed : [];
+  const benefits = Array.isArray(state?.benefits) ? state.benefits : [];
+  const hasStep = task.stepIndex < benefits.length;
+
+  if (!hasStep) {
+    // no such step anymore; finish task
+    await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
+    return;
+  }
+
+  if (completed[task.stepIndex]) {
+    // User completed this step. Move to next if exists (create next task if absent)
+    const nextIndex = task.stepIndex + 1;
+    if (nextIndex < benefits.length) {
+      const nextBenefitKey = String(benefits[nextIndex] || "");
+      const nextClaim = `https://mybenefitsai.org/claim/${encodeURIComponent(task.userId)}`;
+      await NudgeTask.findOneAndUpdate(
+        { userId: task.userId, stepIndex: nextIndex },
+        {
+          $setOnInsert: {
+            to: task.to,
+            fullName: task.fullName,
+            benefitKey: nextBenefitKey,
+            claimUrl: nextClaim,
+            status: "active",
+            attempts: 0,
+            maxAttempts: 5,
+            nextAt: computeNextAt(0, now),
+          },
+          $set: { to: task.to, fullName: task.fullName, benefitKey: nextBenefitKey, claimUrl: nextClaim },
+        },
+        { upsert: true, new: true }
+      );
+    }
+    // close current task
+    await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
+    return;
+  }
+
+  // not completed yet → see if due
+  if (task.nextAt && task.nextAt.getTime() > now) return;
+
+  // due: send nudge
+  const text = buildStepMessage({
+    fullName: task.fullName,
+    benefitKey: task.benefitKey,
+    claimUrl: task.claimUrl,
+  });
+
+  try {
+    const sid = await sendViaLocalTwilio(task.to, text, { stepIndex: task.stepIndex });
+    const attempts = task.attempts + 1;
+
+    if (attempts >= (task.maxAttempts || 5)) {
+      // stop this task
+      await NudgeTask.findByIdAndUpdate(task._id, {
+        attempts, lastSentAt: new Date(), status: "done",
+      });
+    } else {
+      // schedule next
+      await NudgeTask.findByIdAndUpdate(task._id, {
+        attempts,
+        lastSentAt: new Date(),
+        nextAt: computeNextAt(attempts, now),
+      });
+    }
+  } catch (err) {
+    console.error("nudge send failed:", err?.message || err);
+    // back off 5 minutes on failure to avoid hot loop
+    await NudgeTask.findByIdAndUpdate(task._id, {
+      nextAt: new Date(now + 5 * MINUTE),
+    });
+  }
+}
+
+// simple runner every 60s
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const due = await NudgeTask.find({
+      status: "active",
+      nextAt: { $lte: now },
+    })
+      .sort({ nextAt: 1 })
+      .limit(50)
+      .lean();
+
+    for (const t of due) {
+      await handleTaskSend(t);
+    }
+  } catch (e) {
+    console.error("nudge worker error:", e);
+  }
+}, 60 * 1000);
 
 /* ===================== YOUR EXISTING ROUTES (unchanged) ===================== */
 app.post("/api/messages", async (req, res) => {
