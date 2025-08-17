@@ -28,7 +28,7 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN  || "";
 const TWILIO_FROM        = process.env.TWILIO_FROM        || ""; // e.g. +12345551234
 const twilioEnabled = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
-
+app.use(express.json());
 // schedule helpers
 const MINUTE = 60 * 1000;
 const FIRST_GAP_MS = 90 * MINUTE; // 90 minutes for the first nudge
