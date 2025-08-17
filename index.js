@@ -229,6 +229,66 @@ await NudgeTask.findOneAndUpdate(
 
 // worker: runs each 60s and sends due nudges until 5 attempts per step
 async function handleTaskSend(task){
+  // inside handleTaskSend(task) right before sending:
+const text = buildStepMessage({
+  fullName: task.fullName,
+  benefitKey: task.benefitKey,
+  claimUrl : task.claimUrl,
+});
+
+// 1) create a queued log tied to this task
+const queuedLog = await SmsLog.create({
+  userId: task.userId,
+  to: task.to,
+  body: text,
+  status: "queued",
+  meta: { taskId: String(task._id), stepIndex: task.stepIndex }
+}).catch(() => null);
+
+try {
+  // 2) send SMS
+  const sid = await sendViaLocalTwilio(task.to, text);
+
+  // 3) mark log as sent
+  if (queuedLog?._id) {
+    await SmsLog.findByIdAndUpdate(queuedLog._id, {
+      status: "sent",
+      sid,
+      sentAt: new Date()
+    });
+  }
+
+  const attempts = task.attempts + 1;
+  if (attempts >= (task.maxAttempts || 5)) {
+    await NudgeTask.findByIdAndUpdate(task._id, {
+      attempts,
+      lastSentAt: new Date(),
+      status: "done",
+      lastSid: sid
+    });
+  } else {
+    await NudgeTask.findByIdAndUpdate(task._id, {
+      attempts,
+      lastSentAt: new Date(),
+      nextAt: computeNextAt(attempts, Date.now()),
+      lastSid: sid
+    });
+  }
+} catch (err) {
+  // 4) on failure, log it + backoff 5m
+  if (queuedLog?._id) {
+    await SmsLog.findByIdAndUpdate(queuedLog._id, {
+      status: "failed",
+      error: err?.message || "send failed",
+      failedAt: new Date()
+    });
+  }
+  await NudgeTask.findByIdAndUpdate(task._id, {
+    nextAt: new Date(Date.now() + 5 * 60 * 1000),
+    lastError: err?.message || String(err)
+  });
+}
+
   const now = Date.now();
   if (task.status !== "active") return;
 
@@ -302,6 +362,101 @@ setInterval(async () => {
     console.error("nudge worker error:", e);
   }
 }, 60 * 1000);
+// GET /nudges/overview?userId=TEST123
+app.get("/nudges/overview", async (req, res) => {
+  try {
+    const { userId } = req.query || {};
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    const [tasks, logs, progress] = await Promise.all([
+      NudgeTask.find({ userId }).sort({ stepIndex: 1, nextAt: 1 }).lean(),
+      SmsLog.find({ userId }).sort({ createdAt: -1 }).lean(),
+      ProgressState.findOne({ userId }).lean()
+    ]);
+
+    // group logs by taskId for quick join
+    const logsByTask = {};
+    for (const l of logs) {
+      const tid = l?.meta?.taskId || "unmapped";
+      (logsByTask[tid] ||= []).push(l);
+    }
+
+    // summarize counts
+    const counts = {
+      totalTasks: tasks.length,
+      active: tasks.filter(t => t.status === "active").length,
+      done: tasks.filter(t => t.status === "done").length,
+      dueNow: tasks.filter(t => t.status === "active" && t.nextAt && t.nextAt <= new Date()).length,
+      totalSms: logs.length,
+      sentSms: logs.filter(l => l.status === "sent").length,
+      failedSms: logs.filter(l => l.status === "failed").length,
+    };
+
+    // map tasks with their logs
+    const timeline = tasks.map(t => ({
+      taskId: t._id,
+      stepIndex: t.stepIndex,
+      benefitKey: t.benefitKey,
+      to: t.to,
+      status: t.status,
+      attempts: t.attempts,
+      maxAttempts: t.maxAttempts,
+      lastSentAt: t.lastSentAt,
+      nextAt: t.nextAt,
+      lastSid: t.lastSid || null,
+      lastError: t.lastError || null,
+      logs: logsByTask[String(t._id)] || []
+    }));
+
+    return res.json({
+      ok: true,
+      userId,
+      progress: progress ? {
+        activeIndex: progress.activeIndex,
+        unlockedCount: progress.unlockedCount,
+        completed: progress.completed,
+        benefits: progress.benefits
+      } : null,
+      counts,
+      timeline
+    });
+  } catch (e) {
+    console.error("/nudges/overview error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+// GET /nudges/tasks?status=active&dueOnly=true&limit=50
+app.get("/nudges/tasks", async (req, res) => {
+  try {
+    const { userId, status, dueOnly, limit = 50 } = req.query || {};
+    const q = {};
+    if (userId) q.userId = userId;
+    if (status) q.status = status;
+    if (dueOnly === "true") q.nextAt = { $lte: new Date() };
+
+    const tasks = await NudgeTask.find(q).sort({ nextAt: 1 }).limit(Math.min(+limit || 50, 200)).lean();
+    return res.json({ ok: true, count: tasks.length, tasks });
+  } catch (e) {
+    console.error("/nudges/tasks error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+// GET /nudges/logs?userId=TEST123
+// GET /nudges/logs?taskId=<ObjectId>
+app.get("/nudges/logs", async (req, res) => {
+  try {
+    const { userId, taskId, limit = 200 } = req.query || {};
+    const q = {};
+    if (userId) q.userId = userId;
+    if (taskId) q["meta.taskId"] = taskId;
+
+    const logs = await SmsLog.find(q).sort({ createdAt: -1 }).limit(Math.min(+limit || 200, 500)).lean();
+    return res.json({ ok: true, count: logs.length, logs });
+  } catch (e) {
+    console.error("/nudges/logs error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
 
 // ====== PROGRESS ======
 app.get("/progress", async (req, res) => {
