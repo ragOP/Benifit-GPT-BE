@@ -18,7 +18,117 @@ const TrustedFormCert = require("./trustedFormCert");
 
 // NEW: persist tab progress
 const ProgressState = require("./progressState");
+const SmsLog = require("./smsLog");
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const TWILIO_FROM = process.env.TWILIO_FROM || ""; // e.g. +12345551234
+const twilioEnabled = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
 
+let twilioClient = null;
+if (twilioEnabled) {
+  const twilio = require("twilio");
+  twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+}
+
+// helper: generate placeholder random message + url
+function makePlaceholderMessage({ fullName = "Friend" } = {}) {
+  const token = Math.random().toString(36).slice(2, 8); // simple random
+  const url = `https://example.com/go/${token}`; // replace later
+  return `🎉 Hey ${fullName}, you're eligible! Start here: ${url}`;
+}
+
+// helper: send SMS via Twilio (returns { sid })
+async function sendSms({ to, body }) {
+  if (!twilioEnabled) {
+    throw new Error("Twilio is not configured. Set TWILIO_* envs.");
+  }
+  const msg = await twilioClient.messages.create({
+    to,
+    from: TWILIO_FROM,
+    body,
+  });
+  return { sid: msg.sid };
+}
+
+// Avoid spamming: do not send if a message was sent in the last X minutes
+const SMS_COOLDOWN_MINUTES = 60; // change as you like
+
+app.post("/notify/sms", async (req, res) => {
+  try {
+    const { to, userId, fullName, message, meta = {} } = req.body || {};
+    if (!to) return res.status(400).json({ error: "to is required" });
+
+    // optional dedupe by userId
+    if (userId) {
+      const since = new Date(Date.now() - SMS_COOLDOWN_MINUTES * 60 * 1000);
+      const recent = await SmsLog.findOne({
+        userId,
+        createdAt: { $gte: since },
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (recent) {
+        return res.status(200).json({
+          ok: true,
+          message: "skipped due to cooldown",
+          cooldownMinutes: SMS_COOLDOWN_MINUTES,
+          last: { id: recent._id, at: recent.createdAt },
+        });
+      }
+    }
+
+    const body = (message && String(message).trim()) || makePlaceholderMessage({ fullName });
+
+    // log queued
+    const queued = await SmsLog.create({
+      userId: userId || null,
+      to,
+      body,
+      status: "queued",
+      meta,
+    });
+
+    try {
+      const { sid } = await sendSms({ to, body });
+      await SmsLog.findByIdAndUpdate(queued._id, { sid, status: "sent" });
+      return res.status(201).json({ ok: true, id: queued._id, sid });
+    } catch (err) {
+      await SmsLog.findByIdAndUpdate(queued._id, {
+        status: "failed",
+        error: err?.message || "send failed",
+      });
+      return res.status(500).json({ error: "twilio send failed", detail: err?.message });
+    }
+  } catch (e) {
+    console.error("/notify/sms error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+// Optional: quickly check last SMS for a userId
+app.get("/notify/sms/last", async (req, res) => {
+  try {
+    const { userId } = req.query || {};
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+    const last = await SmsLog.findOne({ userId }).sort({ createdAt: -1 }).lean();
+    if (!last) return res.json({ ok: true, last: null });
+    return res.json({
+      ok: true,
+      last: {
+        id: last._id,
+        to: last.to,
+        status: last.status,
+        at: last.createdAt,
+        sid: last.sid || null,
+        error: last.error || null,
+      },
+    });
+  } catch (e) {
+    console.error("/notify/sms/last error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
 // (kept) Stripe init; added apiVersion for stability
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
 const twilioRoutes = require("./twilioRoutes");
