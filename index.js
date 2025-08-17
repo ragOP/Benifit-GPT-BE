@@ -111,8 +111,8 @@ async function sendSms({ to, body }){
 
 // nudge schedule
 const MINUTE = 60 * 1000;
-const FIRST_GAP_MS  = 10 * MINUTE; // first nudge gap after page visit
-const REPEAT_GAP_MS = 10 * MINUTE; // subsequent gaps
+const FIRST_GAP_MS = 2 * MINUTE;   // first follow-up in 2 minutes
+const REPEAT_GAP_MS= 2 * MINUTE;   // then every 2 minutes
 function computeNextAt(attempts, from = Date.now()){
   return new Date(from + (attempts === 0 ? FIRST_GAP_MS : REPEAT_GAP_MS));
 }
@@ -228,6 +228,19 @@ await NudgeTask.findOneAndUpdate(
 });
 
 async function handleTaskSend(task) {
+  setInterval(async () => {
+  try {
+    const now = new Date();
+    const due = await NudgeTask.find({
+      status: "active",
+      nextAt: { $lte: now }   // catch past-due immediately
+    }).sort({ nextAt: 1 }).limit(50).lean();
+
+    for (const t of due) await handleTaskSend(t);
+  } catch (e) {
+    console.error("nudge worker error:", e);
+  }
+}, 10 * 1000);
   const nowMs = Date.now();
   if (task.status !== "active") return;
 
@@ -296,32 +309,35 @@ async function handleTaskSend(task) {
     claimUrl : task.claimUrl,
   });
 
-  try {
-    await sendViaLocalTwilio(task.to, text);
-    const attempts = (task.attempts || 0) + 1;
+try {
+  const sid = await sendViaLocalTwilio(task.to, text);
+  const attempts = (task.attempts || 0) + 1;
 
-    if (attempts >= (task.maxAttempts || 5)) {
-      // Reached max tries — stop this task
-      await NudgeTask.findByIdAndUpdate(task._id, {
-        attempts,
-        lastSentAt: new Date(),
-        status: "done",
-      });
-    } else {
-      // Schedule next try (90m after first, then every 30m)
-      await NudgeTask.findByIdAndUpdate(task._id, {
-        attempts,
-        lastSentAt: new Date(),
-        nextAt: computeNextAt(attempts, nowMs),
-      });
-    }
-  } catch (err) {
-    console.error("nudge send failed:", err?.message || err);
-    // Back off 5 minutes on failure to avoid tight loop
+  if (attempts >= (task.maxAttempts || 5)) {
     await NudgeTask.findByIdAndUpdate(task._id, {
-      nextAt: new Date(nowMs + 5 * 60 * 1000),
+      attempts,
+      lastSentAt: new Date(),
+      lastSid: sid,              // <-- add this
+      lastError: null,           // <-- clear on success
+      status: "done",
+    });
+  } else {
+    await NudgeTask.findByIdAndUpdate(task._id, {
+      attempts,
+      lastSentAt: new Date(),
+      lastSid: sid,              // <-- add this
+      lastError: null,
+      nextAt: computeNextAt(attempts, Date.now()),
     });
   }
+} catch (err) {
+  console.error("nudge send failed:", err?.message || err);
+  await NudgeTask.findByIdAndUpdate(task._id, {
+    lastError: err?.message || String(err), // <-- store error
+    nextAt: new Date(Date.now() + 5 * 60 * 1000), // 5-min backoff on failure
+  });
+}
+
 }
 
 app.get("/nudges/overview", async (req, res) => {
