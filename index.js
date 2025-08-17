@@ -228,67 +228,7 @@ await NudgeTask.findOneAndUpdate(
 });
 
 // worker: runs each 60s and sends due nudges until 5 attempts per step
-async function handleTaskSend(task){
-  // inside handleTaskSend(task) right before sending:
-const text = buildStepMessage({
-  fullName: task.fullName,
-  benefitKey: task.benefitKey,
-  claimUrl : task.claimUrl,
-});
-
-// 1) create a queued log tied to this task
-const queuedLog = await SmsLog.create({
-  userId: task.userId,
-  to: task.to,
-  body: text,
-  status: "queued",
-  meta: { taskId: String(task._id), stepIndex: task.stepIndex }
-}).catch(() => null);
-
-try {
-  // 2) send SMS
-  const sid = await sendViaLocalTwilio(task.to, text);
-
-  // 3) mark log as sent
-  if (queuedLog?._id) {
-    await SmsLog.findByIdAndUpdate(queuedLog._id, {
-      status: "sent",
-      sid,
-      sentAt: new Date()
-    });
-  }
-
-  const attempts = task.attempts + 1;
-  if (attempts >= (task.maxAttempts || 5)) {
-    await NudgeTask.findByIdAndUpdate(task._id, {
-      attempts,
-      lastSentAt: new Date(),
-      status: "done",
-      lastSid: sid
-    });
-  } else {
-    await NudgeTask.findByIdAndUpdate(task._id, {
-      attempts,
-      lastSentAt: new Date(),
-      nextAt: computeNextAt(attempts, Date.now()),
-      lastSid: sid
-    });
-  }
-} catch (err) {
-  // 4) on failure, log it + backoff 5m
-  if (queuedLog?._id) {
-    await SmsLog.findByIdAndUpdate(queuedLog._id, {
-      status: "failed",
-      error: err?.message || "send failed",
-      failedAt: new Date()
-    });
-  }
-  await NudgeTask.findByIdAndUpdate(task._id, {
-    nextAt: new Date(Date.now() + 5 * 60 * 1000),
-    lastError: err?.message || String(err)
-  });
-}
-
+async function handleTaskSend(task) {
   const now = Date.now();
   if (task.status !== "active") return;
 
@@ -296,14 +236,20 @@ try {
   const state = await ProgressState.findOne({ userId: task.userId }).lean().catch(() => null);
   const completed = Array.isArray(state?.completed) ? state.completed : [];
   const benefits  = Array.isArray(state?.benefits)  ? state.benefits  : [];
-  const hasStep   = task.stepIndex < benefits.length;
 
-  if (!hasStep) {
+- const hasStep   = task.stepIndex < benefits.length;
++ // If we don't know benefits yet, DON'T finish the task. Keep sending as scheduled.
++ const benefitsKnown = benefits.length > 0;
++ const hasStep = benefitsKnown ? (task.stepIndex < benefits.length) : true;
+
+- if (!hasStep) {
++ if (benefitsKnown && !hasStep) {
     await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
     return;
   }
 
-  if (completed[task.stepIndex]) {
+- if (completed[task.stepIndex]) {
++ if (benefitsKnown && completed[task.stepIndex]) {
     const nextIndex = task.stepIndex + 1;
     if (nextIndex < benefits.length) {
       const nextBenefitKey = String(benefits[nextIndex] || "");
@@ -326,31 +272,6 @@ try {
     return;
   }
 
-  // send if due
-  if (task.nextAt && task.nextAt.getTime() > now) return;
-
-  const texts = buildStepMessage({
-    fullName: task.fullName,
-    benefitKey: task.benefitKey,
-    claimUrl : task.claimUrl,
-  });
-
-  try {
-    const sid = await sendViaLocalTwilio(task.to, texts);
-    const attempts = task.attempts + 1;
-
-    if (attempts >= (task.maxAttempts || 5)) {
-      await NudgeTask.findByIdAndUpdate(task._id, { attempts, lastSentAt: new Date(), status: "done" });
-    } else {
-      await NudgeTask.findByIdAndUpdate(task._id, {
-        attempts, lastSentAt: new Date(), nextAt: computeNextAt(attempts, now)
-      });
-    }
-  } catch (err) {
-    console.error("nudge send failed:", err?.message || err);
-    await NudgeTask.findByIdAndUpdate(task._id, { nextAt: new Date(now + 5 * MINUTE) });
-  }
-}
 
 setInterval(async () => {
   try {
