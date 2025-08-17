@@ -31,10 +31,45 @@ if (twilioEnabled) {
 }
 
 // helper: generate placeholder random message + url
-function makePlaceholderMessage({ fullName = "Friend" } = {}) {
-  const token = Math.random().toString(36).slice(2, 8); // simple random
-  const url = `https://example.com/go/${token}`; // replace later
-  return `🎉 Hey ${fullName}, you're eligible! Start here: ${url}`;
+function parseJsonBody(req) {
+  // Sometimes proxies send text/plain; attempt to parse if string
+  if (req && typeof req.body === "string") {
+    try { return JSON.parse(req.body); } catch { return {}; }
+  }
+  return req.body || {};
+}
+
+function pickToField(body) {
+  // Accept common aliases
+  return body.to || body.phone || body.number || body.mobile || null;
+}
+
+function normalizeUS(to) {
+  if (!to) return null;
+  let s = String(to).trim();
+  // Already E.164?
+  if (s.startsWith("+")) return s;
+  // Strip non-digits
+  s = s.replace(/\D+/g, "");
+  // US: 11 digits starting with 1
+  if (s.length === 11 && s.startsWith("1")) return "+" + s;
+  // US: 10 digits -> assume +1
+  if (s.length === 10) return "+1" + s;
+  // Fallback: if it’s all digits, try prepend +
+  if (/^\d+$/.test(s)) return "+" + s;
+  return null;
+}
+
+async function sendSms({ to, body }) {
+  if (!twilioEnabled) throw new Error("Twilio not configured (TWILIO_* envs missing).");
+  const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body });
+  return { sid: msg.sid };
+}
+
+function makeDefaultMessage({ fullName = "Friend", userId = "unknown" }) {
+  return `🎉 Hey ${fullName}! You're eligible for benefits we found for you. ` +
+         `Start here: https://mybenefitsai.org/claim/${encodeURIComponent(userId)}\n` +
+         `Reply STOP to opt out.`;
 }
 
 // helper: send SMS via Twilio (returns { sid })
@@ -55,53 +90,73 @@ const SMS_COOLDOWN_MINUTES = 60; // change as you like
 
 app.post("/notify/sms", async (req, res) => {
   try {
-    const { to, userId, fullName, message, meta = {} } = req.body || {};
-    if (!to) return res.status(400).json({ error: "to is required" });
+    const body = parseJsonBody(req);
+    const rawTo = pickToField(body);
+    const to = normalizeUS(rawTo);
 
-    // optional dedupe by userId
-    if (userId) {
+    // Helpful logging for debugging
+    console.log("[/notify/sms] headers:", req.headers);
+    console.log("[/notify/sms] body:", body);
+    console.log("[/notify/sms] rawTo:", rawTo, "normalized:", to);
+
+    if (!to) {
+      return res.status(400).json({
+        error: "to is required",
+        hint: "Send JSON with { to: \"+13322097232\" } (or phone/number). Use Content-Type: application/json.",
+        received: rawTo ?? null
+      });
+    }
+
+    const userId = body.userId || null;
+    const fullName = body.fullName || "Friend";
+    const msgBody = (typeof body.message === "string" && body.message.trim().length > 0)
+      ? body.message.trim()
+      : makeDefaultMessage({ fullName, userId });
+
+    // Optional cooldown by userId
+    if (userId && SmsLog) {
       const since = new Date(Date.now() - SMS_COOLDOWN_MINUTES * 60 * 1000);
-      const recent = await SmsLog.findOne({
-        userId,
-        createdAt: { $gte: since },
-      })
+      const recent = await SmsLog.findOne({ userId, createdAt: { $gte: since } })
         .sort({ createdAt: -1 })
-        .lean();
-
+        .lean()
+        .catch(() => null);
       if (recent) {
         return res.status(200).json({
           ok: true,
           message: "skipped due to cooldown",
           cooldownMinutes: SMS_COOLDOWN_MINUTES,
-          last: { id: recent._id, at: recent.createdAt },
+          last: { id: recent._id, at: recent.createdAt }
         });
       }
     }
 
-    const body = (message && String(message).trim()) || makePlaceholderMessage({ fullName });
-
-    // log queued
-    const queued = await SmsLog.create({
-      userId: userId || null,
-      to,
-      body,
-      status: "queued",
-      meta,
-    });
+    // Log queued (if model present)
+    let queuedId = null;
+    if (SmsLog) {
+      const queued = await SmsLog.create({
+        userId: userId || null,
+        to,
+        body: msgBody,
+        status: "queued",
+        meta: body.meta || {}
+      }).catch(() => null);
+      queuedId = queued?._id || null;
+    }
 
     try {
-      const { sid } = await sendSms({ to, body });
-      await SmsLog.findByIdAndUpdate(queued._id, { sid, status: "sent" });
-      return res.status(201).json({ ok: true, id: queued._id, sid });
+      const { sid } = await sendSms({ to, body: msgBody });
+      if (queuedId && SmsLog) {
+        await SmsLog.findByIdAndUpdate(queuedId, { sid, status: "sent" });
+      }
+      return res.status(201).json({ ok: true, sid, to, body: msgBody });
     } catch (err) {
-      await SmsLog.findByIdAndUpdate(queued._id, {
-        status: "failed",
-        error: err?.message || "send failed",
-      });
-      return res.status(500).json({ error: "twilio send failed", detail: err?.message });
+      if (queuedId && SmsLog) {
+        await SmsLog.findByIdAndUpdate(queuedId, { status: "failed", error: err?.message || "send failed" });
+      }
+      return res.status(500).json({ error: "twilio send failed", detail: err?.message || String(err) });
     }
   } catch (e) {
-    console.error("/notify/sms error:", e);
+    console.error("/notify/sms fatal error:", e);
     return res.status(500).json({ error: "server error" });
   }
 });
