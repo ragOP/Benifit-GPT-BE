@@ -196,20 +196,28 @@ app.post("/nudges/init", async (req, res) => {
     const benefitKey = Array.isArray(tags) && tags.length ? String(tags[0]) : "";
 
     const nextAt = computeNextAt(0);
-    await NudgeTask.findOneAndUpdate(
-      { userId, stepIndex: 0 },
-      {
-        $setOnInsert: {
-          to, fullName, benefitKey, claimUrl,
-          status: "active",
-          attempts: 0,
-          maxAttempts: 5,
-          nextAt,
-        },
-        $set: { to, fullName, benefitKey, claimUrl },
-      },
-      { upsert: true, new: true }
-    );
+
+await NudgeTask.findOneAndUpdate(
+  { userId, stepIndex: 0 },
+  {
+    // always keep these in sync
+    $set: {
+      to,
+      fullName,
+      benefitKey,
+      claimUrl
+    },
+    // only on first insert
+    $setOnInsert: {
+      status: "active",
+      attempts: 0,
+      maxAttempts: 5,
+      nextAt
+    }
+  },
+  { upsert: true, new: true }
+);
+
 
     const combined = buildCombinedFirstMessage({ userId, fullName });
     return res.json({ ok: true, immediateMessage: combined });
