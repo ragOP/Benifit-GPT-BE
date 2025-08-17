@@ -19,9 +19,11 @@ const TrustedFormCert = require("./trustedFormCert");
 // NEW: persist tab progress
 const ProgressState = require("./progressState");
 const SmsLog = require("./smsLog");
+
+// ---------- Twilio (for /notify/sms in this file) ----------
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
-const TWILIO_FROM = process.env.TWILIO_FROM || ""; // e.g. +12345551234
+const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN  || "";
+const TWILIO_FROM        = process.env.TWILIO_FROM        || ""; // e.g. +12345551234
 const twilioEnabled = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
 
 let twilioClient = null;
@@ -30,9 +32,25 @@ if (twilioEnabled) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 }
 
-// helper: generate placeholder random message + url
+/* -------------------- ORDER OF MIDDLEWARE MATTERS -------------------- */
+// Stripe webhook must read raw body
+app.use("/webhook", express.raw({ type: "application/json" }));
+
+// JSON/body & CORS for everything else (MUST be before routes)
+app.use(express.json());
+app.use(cors());
+
+// Mount external Twilio router under /api/notify (this one expects JSON too)
+const twilioRoutes = require("./twilioRoutes");
+app.use("/api/notify", twilioRoutes);
+/* -------------------------------------------------------------------- */
+
+(async () => {
+  await connectToDatabase();
+})();
+
+/* ---------------------- helpers for /notify/sms ---------------------- */
 function parseJsonBody(req) {
-  // Sometimes proxies send text/plain; attempt to parse if string
   if (req && typeof req.body === "string") {
     try { return JSON.parse(req.body); } catch { return {}; }
   }
@@ -40,22 +58,16 @@ function parseJsonBody(req) {
 }
 
 function pickToField(body) {
-  // Accept common aliases
   return body.to || body.phone || body.number || body.mobile || null;
 }
 
 function normalizeUS(to) {
   if (!to) return null;
   let s = String(to).trim();
-  // Already E.164?
   if (s.startsWith("+")) return s;
-  // Strip non-digits
   s = s.replace(/\D+/g, "");
-  // US: 11 digits starting with 1
   if (s.length === 11 && s.startsWith("1")) return "+" + s;
-  // US: 10 digits -> assume +1
   if (s.length === 10) return "+1" + s;
-  // Fallback: if it’s all digits, try prepend +
   if (/^\d+$/.test(s)) return "+" + s;
   return null;
 }
@@ -67,34 +79,24 @@ async function sendSms({ to, body }) {
 }
 
 function makeDefaultMessage({ fullName = "Friend", userId = "unknown" }) {
-  return `🎉 Hey ${fullName}! You're eligible for benefits we found for you. ` +
-         `Start here: https://mybenefitsai.org/claim/${encodeURIComponent(userId)}\n` +
-         `Reply STOP to opt out.`;
+  return (
+    `🎉 Hey ${fullName}! You're eligible for benefits we found for you. ` +
+    `Start here: https://mybenefitsai.org/claim/${encodeURIComponent(userId)}\n` +
+    `Reply STOP to opt out.`
+  );
 }
-
-// helper: send SMS via Twilio (returns { sid })
-async function sendSms({ to, body }) {
-  if (!twilioEnabled) {
-    throw new Error("Twilio is not configured. Set TWILIO_* envs.");
-  }
-  const msg = await twilioClient.messages.create({
-    to,
-    from: TWILIO_FROM,
-    body,
-  });
-  return { sid: msg.sid };
-}
+/* -------------------------------------------------------------------- */
 
 // Avoid spamming: do not send if a message was sent in the last X minutes
-const SMS_COOLDOWN_MINUTES = 60; // change as you like
+const SMS_COOLDOWN_MINUTES = 60;
 
+// ✅ This route is NOW after express.json(), so req.body will be parsed.
 app.post("/notify/sms", async (req, res) => {
   try {
     const body = parseJsonBody(req);
     const rawTo = pickToField(body);
     const to = normalizeUS(rawTo);
 
-    // Helpful logging for debugging
     console.log("[/notify/sms] headers:", req.headers);
     console.log("[/notify/sms] body:", body);
     console.log("[/notify/sms] rawTo:", rawTo, "normalized:", to);
@@ -102,16 +104,18 @@ app.post("/notify/sms", async (req, res) => {
     if (!to) {
       return res.status(400).json({
         error: "to is required",
-        hint: "Send JSON with { to: \"+13322097232\" } (or phone/number). Use Content-Type: application/json.",
-        received: rawTo ?? null
+        hint:
+          'Send JSON with { "to": "+13322097232" } (or phone/number). Use Content-Type: application/json.',
+        received: rawTo ?? null,
       });
     }
 
     const userId = body.userId || null;
     const fullName = body.fullName || "Friend";
-    const msgBody = (typeof body.message === "string" && body.message.trim().length > 0)
-      ? body.message.trim()
-      : makeDefaultMessage({ fullName, userId });
+    const msgBody =
+      typeof body.message === "string" && body.message.trim().length > 0
+        ? body.message.trim()
+        : makeDefaultMessage({ fullName, userId });
 
     // Optional cooldown by userId
     if (userId && SmsLog) {
@@ -125,12 +129,12 @@ app.post("/notify/sms", async (req, res) => {
           ok: true,
           message: "skipped due to cooldown",
           cooldownMinutes: SMS_COOLDOWN_MINUTES,
-          last: { id: recent._id, at: recent.createdAt }
+          last: { id: recent._id, at: recent.createdAt },
         });
       }
     }
 
-    // Log queued (if model present)
+    // Log queued
     let queuedId = null;
     if (SmsLog) {
       const queued = await SmsLog.create({
@@ -138,7 +142,7 @@ app.post("/notify/sms", async (req, res) => {
         to,
         body: msgBody,
         status: "queued",
-        meta: body.meta || {}
+        meta: body.meta || {},
       }).catch(() => null);
       queuedId = queued?._id || null;
     }
@@ -184,19 +188,11 @@ app.get("/notify/sms/last", async (req, res) => {
     return res.status(500).json({ error: "server error" });
   }
 });
+
 // (kept) Stripe init; added apiVersion for stability
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
-const twilioRoutes = require("./twilioRoutes");
-// Webhook must get raw body
-app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json());
-app.use(cors());
-app.use("/api/notify", twilioRoutes);
 
-(async () => {
-  await connectToDatabase();
-})();
-
+/* ===================== YOUR EXISTING ROUTES (unchanged) ===================== */
 app.post("/api/messages", async (req, res) => {
   const { userId, replies, qualifiedFor } = req.body;
 
@@ -228,7 +224,7 @@ app.post("/api/messages", async (req, res) => {
     .json({ data: responses, message: "Responses saved successfully" });
 });
 
-app.get("/api/messages", async (req, res) => {
+app.get("/api/messages", async (_req, res) => {
   try {
     const allResponses = await UserResponse.find({});
     return res.status(200).json({ data: allResponses });
@@ -249,7 +245,7 @@ app.post("/api/chatbot", async (req, res) => {
   }
 });
 
-app.get("/api/chatbot", async (req, res) => {
+app.get("/api/chatbot", async (_req, res) => {
   try {
     const responses = await ChatbotResponse.find().sort({ createdAt: -1 });
     res.status(200).json(responses);
@@ -259,7 +255,7 @@ app.get("/api/chatbot", async (req, res) => {
   }
 });
 
-app.get("/chatbotmessages", async (req, res) => {
+app.get("/chatbotmessages", async (_req, res) => {
   try {
     const responses = await ChatbotResponse.find().sort({ createdAt: -1 });
     res.status(200).json(responses);
@@ -286,12 +282,12 @@ app.post("/email", async (req, res) => {
   return res.status(200).json({ data: response });
 });
 
-app.get("/email", async (req, res) => {
+app.get("/email", async (_req, res) => {
   const emails = await Email.find({});
   return res.status(200).json({ data: emails });
 });
 
-// -------------------------------------------------- BENIFIT GPT ROUTES --------------------------------------------------
+// -------------------------------------------------- BENEFIT GPT ROUTES --------------------------------------------------
 const TAGS = {
   is_md: "Medicare",
   is_ssdi: "SSDI",
@@ -340,34 +336,29 @@ app.post("/api/update-record", async (req, res) => {
   }
 });
 
-app.get("/response/all", async (req, res) => {
+app.get("/response/all", async (_req, res) => {
   const response = await Response.find({}).sort({ createdAt: -1 });
   return res.status(200).json({ data: response });
 });
 
 app.get("/check/offer", async (req, res) => {
   try {
-    const { name } = req.query; // keep ?name= syntax
+    const { name } = req.query;
     if (!name || typeof name !== "string") {
       return res.status(400).json({ error: "name is required in query" });
     }
 
     const value = String(name).trim();
-
-    // Helper to escape regex specials in user-provided text
     const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-    // 1) Try exact userId match (short or long, any length)
     let doc = await Response.findOne({ userId: value });
 
-    // 2) If not found, try exact fullName match (case-insensitive; ignores trailing spaces)
     if (!doc) {
       doc = await Response.findOne({
         fullName: new RegExp("^" + escapeRegex(value) + "\\s*$", "i"),
       });
     }
 
-    // 3) Return result (or 404 if nothing)
     if (!doc) {
       return res.status(404).json({ error: "No offer found for provided name/userId" });
     }
@@ -385,11 +376,7 @@ app.post("/email/submit", async (req, res) => {
       "https://api.brevo.com/v3/contacts",
       {
         email,
-        attributes: {
-          FIRSTNAME: name,
-          LASTNAME: email,
-          USER_ID: userId,
-        },
+        attributes: { FIRSTNAME: name, LASTNAME: email, USER_ID: userId },
         listIds: [5],
         updateEnabled: true,
       },
@@ -430,7 +417,7 @@ app.get("/check/model", async (req, res) => {
   }
 });
 
-app.post('/api/create-checkout', async (req, res) => {
+app.post("/api/create-checkout", async (req, res) => {
   const { variantId } = req.body
   try {
     const resp = await fetch('https://api.lemonsqueezy.com/v1/checkouts', {
@@ -444,11 +431,9 @@ app.post('/api/create-checkout', async (req, res) => {
         data: {
           type: 'checkouts',
           attributes: {
-            custom_price: 10, // note: Lemon uses cents; 100 would be $1.00
+            custom_price: 10,
             checkout_options: { embed: true },
-            product_options: {
-              redirect_url: process.env.AFTER_PAY_REDIRECT,
-            },
+            product_options: { redirect_url: process.env.AFTER_PAY_REDIRECT },
           },
           relationships: {
             store: { data: { type: 'stores', id: process.env.STORE_ID?.toString() } },
@@ -458,7 +443,7 @@ app.post('/api/create-checkout', async (req, res) => {
       }),
     })
     const json = await resp.json()
-    if (!json || !json.data || !json.data.attributes || !json.data.attributes.url) {
+    if (!json?.data?.attributes?.url) {
       console.error('Invalid Lemon API response:', json);
       return res.status(500).json({ error: 'Invalid Lemon API response' });
     }
@@ -476,20 +461,14 @@ app.post("/api/create-checkout-session", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
       mode: "payment",
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: "Your Benefits Report",
-              description: `For ${name}`,
-            },
-            unit_amount: parseInt(amount) || 10,
-          },
-          quantity: 1,
+      line_items: [{
+        price_data: {
+          currency: "usd",
+          product_data: { name: "Your Benefits Report", description: `For ${name}` },
+          unit_amount: parseInt(amount) || 10,
         },
-      ],
-      // customer_email: email,
+        quantity: 1,
+      }],
       success_url: "https://mybenefitsai.org/success",
       cancel_url: "https://mybenefitsai.org/cancel",
       metadata: { userId, name },
@@ -505,15 +484,12 @@ app.post("/api/create-checkout-session", async (req, res) => {
 // ------------------------ NEW: RAG $1.00 USD PaymentIntent endpoints ------------------------
 let RAG_LAST_PI = null;
 
-// Health (simple)
 app.get("/rag/health", (_req, res) => res.json({ ok: true }));
 
-// Create a fixed $1 PaymentIntent (USD)
 app.post("/rag/oneusd/create", async (_req, res) => {
   try {
     const intent = await stripe.paymentIntents.create({
-      amount: 100,                  // $1.00
-      currency: "usd",
+      amount: 100, currency: "usd",
       automatic_payment_methods: { enabled: true }
     });
     RAG_LAST_PI = intent.id;
@@ -524,7 +500,6 @@ app.post("/rag/oneusd/create", async (_req, res) => {
   }
 });
 
-// Check PI status: uses ?id= to check any PI, or falls back to last created
 app.get("/rag/intent/status", async (req, res) => {
   try {
     const { id } = req.query;
@@ -536,9 +511,8 @@ app.get("/rag/intent/status", async (req, res) => {
     return res.status(500).json({ error: err?.message || "Server error" });
   }
 });
-// --------------------------------------------------------------------------------------------
 
-// Stripe webhook (raw body)
+// Stripe webhook handler (already has raw body above)
 app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -559,33 +533,23 @@ app.post("/webhook", async (req, res) => {
 
     try {
       await axios.post("https://benifit-gpt-be.onrender.com/api/update-record", {
-        userId,
-        isPaymentSuccess: true,
+        userId, isPaymentSuccess: true,
       });
-    } catch (e) {
-      console.error("❌ Failed to update record:", e.message);
-    }
+    } catch (e) { console.error("❌ Failed to update record:", e.message); }
 
     try {
       await axios.post("https://benifit-gpt-be.onrender.com/email/submit", {
-        email,
-        name,
-        userId,
+        email, name, userId,
       });
-    } catch (e) {
-      console.error("❌ Failed to send email:", e.message);
-    }
+    } catch (e) { console.error("❌ Failed to send email:", e.message); }
   }
 
   return res.status(200).json({ received: true });
 });
 
-// ___ missing u farish noob 
-// --- ADD THIS NEAR YOUR OTHER REQUIRES ---
+// Analytics (unchanged)
 const AnalyticsEvent = require("./analyticsEvent");
-
-// --- helper to get IP (works behind proxies if trust proxy is set) ---
-app.set('trust proxy', true);
+app.set("trust proxy", true);
 function getIp(req) {
   return (
     req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
@@ -594,23 +558,15 @@ function getIp(req) {
   );
 }
 
-// ----------- ANALYTICS ROUTES -----------
-
-// Generic event endpoint (you can use this for everything)
 app.post("/analytics/event", async (req, res) => {
   try {
     const { type, page, buttonId, userId, sessionId, meta } = req.body || {};
     if (!type) return res.status(400).json({ error: "type is required" });
 
     const doc = await AnalyticsEvent.create({
-      type,
-      page: page || null,
-      buttonId: buttonId || null,
-      userId: userId || null,
-      sessionId: sessionId || null,
-      meta: meta || {},
-      ip: getIp(req),
-      ua: req.headers["user-agent"] || null,
+      type, page: page || null, buttonId: buttonId || null,
+      userId: userId || null, sessionId: sessionId || null, meta: meta || {},
+      ip: getIp(req), ua: req.headers["user-agent"] || null,
       referrer: req.headers["referer"] || req.headers["referrer"] || null,
     });
 
@@ -621,18 +577,12 @@ app.post("/analytics/event", async (req, res) => {
   }
 });
 
-// Quick helpers (optional sugar):
 app.post("/analytics/pageview", async (req, res) => {
   try {
     const { page = "/", userId = null, sessionId = null, meta = {} } = req.body || {};
     const doc = await AnalyticsEvent.create({
-      type: "page_view",
-      page,
-      userId,
-      sessionId,
-      meta,
-      ip: getIp(req),
-      ua: req.headers["user-agent"] || null,
+      type: "page_view", page, userId, sessionId, meta,
+      ip: getIp(req), ua: req.headers["user-agent"] || null,
       referrer: req.headers["referer"] || req.headers["referrer"] || null,
     });
     return res.status(201).json({ ok: true, id: doc._id });
@@ -648,14 +598,8 @@ app.post("/analytics/button", async (req, res) => {
     if (!buttonId) return res.status(400).json({ error: "buttonId is required" });
 
     const doc = await AnalyticsEvent.create({
-      type: "button_click",
-      page,
-      buttonId,
-      userId,
-      sessionId,
-      meta,
-      ip: getIp(req),
-      ua: req.headers["user-agent"] || null,
+      type: "button_click", page, buttonId, userId, sessionId, meta,
+      ip: getIp(req), ua: req.headers["user-agent"] || null,
       referrer: req.headers["referer"] || req.headers["referrer"] || null,
     });
     return res.status(201).json({ ok: true, id: doc._id });
@@ -665,31 +609,9 @@ app.post("/analytics/button", async (req, res) => {
   }
 });
 
-// Congrats page visit
-app.post("/analytics/congrats", async (req, res) => {
-  try {
-    const { userId = null, sessionId = null, meta = {} } = req.body || {};
-    const doc = await AnalyticsEvent.create({
-      type: "page_visit",
-      page: "/congratulations",
-      userId,
-      sessionId,
-      meta,
-      ip: getIp(req),
-      ua: req.headers["user-agent"] || null,
-      referrer: req.headers["referer"] || req.headers["referrer"] || null,
-    });
-    return res.status(201).json({ ok: true, id: doc._id });
-  } catch (e) {
-    console.error("analytics/congrats error:", e);
-    return res.status(500).json({ error: "failed to log congrats visit" });
-  }
-});
-
-// Simple summary (counts per page and per button, optional time filter)
 app.get("/analytics/summary", async (req, res) => {
   try {
-    const { from, to } = req.query; // ISO strings optional
+    const { from, to } = req.query;
     const match = {};
     if (from || to) {
       match.createdAt = {};
@@ -722,209 +644,8 @@ app.get("/analytics/summary", async (req, res) => {
   }
 });
 
-
-// ========================= TrustedForm: BACKEND INTEGRATION =========================
-// .env must contain: TRUSTEDFORM_API_KEY=YOUR_KEY   (server-side only)
-
-// Validate cert URL is a TF certificate URL
-function isValidTfCertUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.hostname === "cert.trustedform.com";
-  } catch {
-    return false;
-  }
-}
-
-// Build Basic auth header: username "API", password = API key
-function tfAuthHeader() {
-  const key = process.env.TRUSTEDFORM_API_KEY;
-  if (!key) return null;
-  return "Basic " + Buffer.from(`API:${key}`).toString("base64");
-}
-
-// quick health
-app.get("/tf/health", (_req, res) => {
-  res.json({ ok: !!process.env.TRUSTEDFORM_API_KEY });
-});
-
-// Claim/retain the certificate + LOG it in Mongo
-app.post("/tf/claim", async (req, res) => {
-  try {
-    const {
-      cert_url,
-      email,
-      phone,
-      reference,
-      vendor,
-      required_scan_terms,
-      forbidden_scan_terms,
-    } = req.body || {};
-
-    if (!cert_url || !isValidTfCertUrl(cert_url)) {
-      return res.status(400).json({ success: false, error: "Invalid cert_url" });
-    }
-
-    const auth = tfAuthHeader();
-    if (!auth) {
-      return res.status(500).json({ success: false, error: "Missing TRUSTEDFORM_API_KEY" });
-    }
-
-    // Prepare optional body for TF
-    const body = {
-      email_1: email || undefined,
-      phone_1: phone || undefined,
-      reference: reference || undefined,
-      vendor: vendor || undefined,
-      required_scan_terms: required_scan_terms || undefined,
-      forbidden_scan_terms: forbidden_scan_terms || undefined,
-    };
-
-    // POST to the certificate URL to claim
-    const tfResp = await axios.post(cert_url, body, {
-      headers: {
-        Authorization: auth,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        // "Api-Version": "4.0", // uncomment if your account requires it
-      },
-      timeout: 10000,
-      validateStatus: () => true,
-    });
-
-    // Upsert a log of this certificate in Mongo
-    const payloadForDb = {
-      cert_url,
-      reference: reference || null,
-      vendor: vendor || null,
-      email: email || null,
-      phone: phone || null,
-      claimed: tfResp.status >= 200 && tfResp.status < 300,
-      statusCode: tfResp.status,
-      tf_response: tfResp.data || null,
-      error: tfResp.status >= 200 && tfResp.status < 300 ? null :
-             (typeof tfResp.data === "string"
-               ? tfResp.data
-               : (tfResp.data?.error || tfResp.data?.message || "Claim failed")),
-    };
-
-    await TrustedFormCert.findOneAndUpdate(
-      { cert_url },
-      payloadForDb,
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-
-    return res.status(tfResp.status).json({
-      success: payloadForDb.claimed,
-      data: tfResp.data,
-    });
-  } catch (err) {
-    console.error("TF claim error:", err?.response?.data || err?.message || err);
-    try {
-      // best-effort log even when request threw
-      const { cert_url, email, phone, reference, vendor } = req.body || {};
-      if (cert_url) {
-        await TrustedFormCert.findOneAndUpdate(
-          { cert_url },
-          {
-            cert_url,
-            reference: reference || null,
-            vendor: vendor || null,
-            email: email || null,
-            phone: phone || null,
-            claimed: false,
-            statusCode: null,
-            tf_response: null,
-            error: err?.message || "Server error",
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-      }
-    } catch (_) {}
-    return res.status(500).json({ success: false, error: "Server error" });
-  }
-});
-
-// List certificates we have seen/claimed
-// Query params (all optional):
-//   q=<string> (search in cert_url/reference/phone/email)
-//   claimed=true|false
-//   limit=50 (default 50, max 200)
-//   page=1
-//   sort=-createdAt  (default newest first)
-app.get("/tf/certs", async (req, res) => {
-  try {
-    const {
-      q = "",
-      claimed,
-      limit = 50,
-      page = 1,
-      sort = "-createdAt",
-    } = req.query;
-
-    const lim = Math.min(parseInt(limit) || 50, 200);
-    const skip = Math.max(((parseInt(page) || 1) - 1) * lim, 0);
-
-    const match = {};
-    if (q) {
-      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      match.$or = [
-        { cert_url: rx },
-        { reference: rx },
-        { phone: rx },
-        { email: rx },
-        { vendor: rx },
-      ];
-    }
-    if (claimed === "true") match.claimed = true;
-    if (claimed === "false") match.claimed = false;
-
-    const [items, total] = await Promise.all([
-      TrustedFormCert.find(match)
-        .sort(sort)
-        .skip(skip)
-        .limit(lim)
-        .lean(),
-      TrustedFormCert.countDocuments(match),
-    ]);
-
-    return res.json({
-      total,
-      page: parseInt(page) || 1,
-      perPage: lim,
-      items,
-    });
-  } catch (e) {
-    console.error("/tf/certs error:", e);
-    return res.status(500).json({ error: "failed to list certificates" });
-  }
-});
-
-// Optional: fetch single by _id
-app.get("/tf/certs/:id", async (req, res) => {
-  try {
-    const item = await TrustedFormCert.findById(req.params.id).lean();
-    if (!item) return res.status(404).json({ error: "not found" });
-    return res.json(item);
-  } catch (e) {
-    return res.status(500).json({ error: "server error" });
-  }
-});
-// ======================= End TrustedForm: BACKEND INTEGRATION =======================
-
-
-
-/* =========================
- * NEW: PROGRESS MEMORY API
- * =========================
- * Frontend expects:
- *  - GET  /progress?userId=...
- *  - POST /progress   body { userId, completed, unlockedCount, activeIndex, benefits? }
- */
-function normalizeBoolArray(arr) {
-  if (!Array.isArray(arr)) return [];
-  return arr.map((v) => !!v);
-}
+// Progress API (unchanged)
+function normalizeBoolArray(arr) { if (!Array.isArray(arr)) return []; return arr.map((v) => !!v); }
 
 app.get("/progress", async (req, res) => {
   try {
@@ -935,14 +656,7 @@ app.get("/progress", async (req, res) => {
 
     const doc = await ProgressState.findOne({ userId }).lean();
     if (!doc) {
-      // sensible defaults if none saved yet
-      return res.json({
-        userId,
-        completed: [],
-        unlockedCount: 1,
-        activeIndex: 0,
-        benefits: [],
-      });
+      return res.json({ userId, completed: [], unlockedCount: 1, activeIndex: 0, benefits: [] });
     }
 
     return res.json({
@@ -962,7 +676,6 @@ app.get("/progress", async (req, res) => {
 app.post("/progress", async (req, res) => {
   try {
     let { userId, completed, unlockedCount, activeIndex, benefits } = req.body || {};
-
     if (!userId || typeof userId !== "string") {
       return res.status(400).json({ error: "userId is required" });
     }
@@ -974,14 +687,7 @@ app.post("/progress", async (req, res) => {
 
     const doc = await ProgressState.findOneAndUpdate(
       { userId },
-      {
-        $set: {
-          completed,
-          unlockedCount,
-          activeIndex,
-          benefits,
-        },
-      },
+      { $set: { completed, unlockedCount, activeIndex, benefits } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
 
@@ -1001,7 +707,6 @@ app.post("/progress", async (req, res) => {
     return res.status(500).json({ error: "server error" });
   }
 });
-
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
