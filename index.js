@@ -20,6 +20,7 @@ const ProgressState  = require("./progressState");
 const SmsLog         = require("./smsLog");
 const AnalyticsEvent = require("./analyticsEvent");
 const NudgeTask      = require("./nudgeTask");
+const { attachNudges } = require("./nudge/index"); 
 
 // message templates (centralized)
 const {
@@ -41,6 +42,13 @@ if (twilioEnabled) {
   const twilio = require("twilio");
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 }
+attachNudges(app, {
+  NudgeTask,
+  ProgressState,
+  SmsLog,
+  twilioClient,
+  TWILIO_FROM
+});
 
 // ====== MIDDLEWARE ORDER (IMPORTANT) ======
 // 1) Stripe webhook needs RAW body
