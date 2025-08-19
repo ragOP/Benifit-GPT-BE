@@ -1,4 +1,3 @@
-// index.js
 const express = require("express");
 const axios = require("axios");
 const Stripe = require("stripe");
@@ -20,13 +19,6 @@ const ProgressState  = require("./progressState");
 const SmsLog         = require("./smsLog");
 const AnalyticsEvent = require("./analyticsEvent");
 const NudgeTask      = require("./nudgeTask");
-const { attachNudges } = require("./nudge/index"); 
-
-// message templates (centralized)
-const {
-  buildStepMessage,
-  buildCombinedFirstMessage
-} = require("./utils/messageTemplates");
 
 // ====== STRIPE ======
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
@@ -42,13 +34,6 @@ if (twilioEnabled) {
   const twilio = require("twilio");
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 }
-attachNudges(app, {
-  NudgeTask,
-  ProgressState,
-  SmsLog,
-  twilioClient,
-  TWILIO_FROM
-});
 
 // ====== MIDDLEWARE ORDER (IMPORTANT) ======
 // 1) Stripe webhook needs RAW body
@@ -82,7 +67,7 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions)); 
+app.options(/.*/, cors(corsOptions));
 
 // 4) External Twilio REST router (optional helpers under /api/notify)
 const twilioRoutes = require("./twilioRoutes");
@@ -91,9 +76,7 @@ app.use("/api/notify", twilioRoutes);
 // ====== DB ======
 (async () => { await connectToDatabase(); })();
 
-// ====== HELPERS ======
-function normalizeBoolArray(arr){ return Array.isArray(arr) ? arr.map(Boolean) : []; }
-
+// ====== SIMPLE SMS SEND (keep this) ======
 function parseJsonBody(req){
   if (req && typeof req.body === "string") {
     try { return JSON.parse(req.body); } catch { return {}; }
@@ -117,20 +100,6 @@ async function sendSms({ to, body }){
   return { sid: msg.sid };
 }
 
-// nudge schedule
-const MINUTE = 60 * 1000;
-const FIRST_GAP_MS = 2 * MINUTE;   // first follow-up in 2 minutes
-const REPEAT_GAP_MS= 2 * MINUTE;   // then every 2 minutes
-function computeNextAt(attempts, from = Date.now()){
-  return new Date(from + (attempts === 0 ? FIRST_GAP_MS : REPEAT_GAP_MS));
-}
-
-async function sendViaLocalTwilio(to, message){
-  const { sid } = await twilioClient.messages.create({ to, from: TWILIO_FROM, body: message });
-  return sid;
-}
-
-// ====== SMS (no cooldown) ======
 app.post("/notify/sms", async (req, res) => {
   try {
     const body = parseJsonBody(req);
@@ -153,7 +122,6 @@ app.post("/notify/sms", async (req, res) => {
 Start here: https://mybenefitsai.org/claim/${encodeURIComponent(userId || "unknown")}
 Reply STOP to opt out.`;
 
-    // (optional) log queued
     let queuedId = null;
     if (SmsLog) {
       const q = await SmsLog.create({
@@ -192,321 +160,79 @@ app.get("/notify/sms/last", async (req, res) => {
   }
 });
 
-// ====== NUDGES ======
-// SINGLE authoritative /nudges/init
-// body: { userId, to, fullName, tags[] }
-app.post("/nudges/init", async (req, res) => {
-  try {
-    const { userId, to, fullName = "User", tags = [] } = req.body || {};
-    if (!userId || !to) return res.status(400).json({ error: "userId and to are required" });
-
-    const claimUrl   = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
-    const benefitKey = Array.isArray(tags) && tags.length ? String(tags[0]) : "";
-
-    const nextAt = computeNextAt(0);
-
-await NudgeTask.findOneAndUpdate(
-  { userId, stepIndex: 0 },
-  {
-    // always keep these in sync
-    $set: {
-      to,
-      fullName,
-      benefitKey,
-      claimUrl
-    },
-    // only on first insert
-    $setOnInsert: {
-      status: "active",
-      attempts: 0,
-      maxAttempts: 5,
-      nextAt
-    }
-  },
-  { upsert: true, new: true }
-);
-
-
-    const combined = buildCombinedFirstMessage({ userId, fullName });
-    return res.json({ ok: true, immediateMessage: combined });
-  } catch (e) {
-    console.error("/nudges/init error:", e);
-    return res.status(500).json({ error: "server error" });
-  }
+// ====== ATTACH NUDGES (after express.json!) ======
+const { attachNudges } = require("./nudge/index");
+attachNudges(app, {
+  NudgeTask,
+  ProgressState,
+  SmsLog,
+  twilioClient,
+  TWILIO_FROM
 });
 
-async function handleTaskSend(task) {
-  setInterval(async () => {
+// ====== PROGRESS (unchanged) ======
+function normalizeBoolArray(arr){ return Array.isArray(arr) ? arr.map(Boolean) : []; }
+app.get("/progress", async (req, res) => {
   try {
-    const now = new Date();
-    const due = await NudgeTask.find({
-      status: "active",
-      nextAt: { $lte: now }   // catch past-due immediately
-    }).sort({ nextAt: 1 }).limit(50).lean();
-
-    for (const t of due) await handleTaskSend(t);
-  } catch (e) {
-    console.error("nudge worker error:", e);
-  }
-}, 10 * 1000);
-  const nowMs = Date.now();
-  if (task.status !== "active") return;
-
-  // 1) Read current progress
-  const state = await ProgressState.findOne({ userId: task.userId })
-    .lean()
-    .catch(() => null);
-
-  const completed = Array.isArray(state?.completed) ? state.completed : [];
-  const benefits  = Array.isArray(state?.benefits)  ? state.benefits  : [];
-
-  // 2) If benefits are unknown, DO NOT finish this task. Keep sending as scheduled.
-  const benefitsKnown = benefits.length > 0;
-
-  // When we do know benefits, the task is only valid if its stepIndex exists.
-  const hasStep = benefitsKnown ? (task.stepIndex < benefits.length) : true;
-
-  // If benefitsKnown and step doesn't exist anymore → finish this task.
-  if (benefitsKnown && !hasStep) {
-    await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
-    return;
-  }
-
-  // If benefitsKnown and this step is already completed → spawn next (if any) and finish this task.
-  if (benefitsKnown && completed[task.stepIndex]) {
-    const nextIndex = task.stepIndex + 1;
-
-    if (nextIndex < benefits.length) {
-      const nextBenefitKey = String(benefits[nextIndex] || "");
-      const nextClaim      = `https://mybenefitsai.org/claim/${encodeURIComponent(task.userId)}`;
-
-      await NudgeTask.findOneAndUpdate(
-        { userId: task.userId, stepIndex: nextIndex },
-        {
-          $setOnInsert: {
-            to: task.to,
-            fullName: task.fullName,
-            benefitKey: nextBenefitKey,
-            claimUrl: nextClaim,
-            status: "active",
-            attempts: 0,
-            maxAttempts: 5,
-            nextAt: computeNextAt(0, nowMs),
-          },
-          $set: {
-            to: task.to,
-            fullName: task.fullName,
-            benefitKey: nextBenefitKey,
-            claimUrl: nextClaim,
-          },
-        },
-        { upsert: true, new: true }
-      );
+    const { userId } = req.query;
+    if (!userId || typeof userId !== "string") {
+      return res.status(400).json({ error: "userId is required" });
     }
-
-    await NudgeTask.findByIdAndUpdate(task._id, { status: "done" });
-    return;
-  }
-
-  // 3) Not completed → send when due
-  if (task.nextAt && task.nextAt.getTime() > nowMs) return; // not yet due
-
-  const text = buildStepMessage({
-    fullName: task.fullName,
-    benefitKey: task.benefitKey,
-    claimUrl : task.claimUrl,
-  });
-
-try {
-  const sid = await sendViaLocalTwilio(task.to, text);
-  const attempts = (task.attempts || 0) + 1;
-
-  if (attempts >= (task.maxAttempts || 5)) {
-    await NudgeTask.findByIdAndUpdate(task._id, {
-      attempts,
-      lastSentAt: new Date(),
-      lastSid: sid,              // <-- add this
-      lastError: null,           // <-- clear on success
-      status: "done",
-    });
-  } else {
-    await NudgeTask.findByIdAndUpdate(task._id, {
-      attempts,
-      lastSentAt: new Date(),
-      lastSid: sid,              // <-- add this
-      lastError: null,
-      nextAt: computeNextAt(attempts, Date.now()),
-    });
-  }
-} catch (err) {
-  console.error("nudge send failed:", err?.message || err);
-  await NudgeTask.findByIdAndUpdate(task._id, {
-    lastError: err?.message || String(err), // <-- store error
-    nextAt: new Date(Date.now() + 5 * 60 * 1000), // 5-min backoff on failure
-  });
-}
-
-}
-
-app.get("/nudges/overview", async (req, res) => {
-  try {
-    const { userId } = req.query || {};
-    if (!userId) return res.status(400).json({ error: "userId is required" });
-
-    const [tasks, logs, progress] = await Promise.all([
-      NudgeTask.find({ userId }).sort({ stepIndex: 1, nextAt: 1 }).lean(),
-      SmsLog.find({ userId }).sort({ createdAt: -1 }).lean(),
-      ProgressState.findOne({ userId }).lean()
-    ]);
-
-    // group logs by taskId for quick join
-    const logsByTask = {};
-    for (const l of logs) {
-      const tid = l?.meta?.taskId || "unmapped";
-      (logsByTask[tid] ||= []).push(l);
+    const doc = await ProgressState.findOne({ userId }).lean();
+    if (!doc) {
+      return res.json({ userId, completed: [], unlockedCount: 1, activeIndex: 0, benefits: [] });
     }
-
-    // summarize counts
-    const counts = {
-      totalTasks: tasks.length,
-      active: tasks.filter(t => t.status === "active").length,
-      done: tasks.filter(t => t.status === "done").length,
-      dueNow: tasks.filter(t => t.status === "active" && t.nextAt && t.nextAt <= new Date()).length,
-      totalSms: logs.length,
-      sentSms: logs.filter(l => l.status === "sent").length,
-      failedSms: logs.filter(l => l.status === "failed").length,
-    };
-
-    // map tasks with their logs
-    const timeline = tasks.map(t => ({
-      taskId: t._id,
-      stepIndex: t.stepIndex,
-      benefitKey: t.benefitKey,
-      to: t.to,
-      status: t.status,
-      attempts: t.attempts,
-      maxAttempts: t.maxAttempts,
-      lastSentAt: t.lastSentAt,
-      nextAt: t.nextAt,
-      lastSid: t.lastSid || null,
-      lastError: t.lastError || null,
-      logs: logsByTask[String(t._id)] || []
-    }));
-
     return res.json({
-      ok: true,
-      userId,
-      progress: progress ? {
-        activeIndex: progress.activeIndex,
-        unlockedCount: progress.unlockedCount,
-        completed: progress.completed,
-        benefits: progress.benefits
-      } : null,
-      counts,
-      timeline
+      userId: doc.userId,
+      completed: doc.completed || [],
+      unlockedCount: Number.isFinite(doc.unlockedCount) ? doc.unlockedCount : 1,
+      activeIndex: Number.isFinite(doc.activeIndex)   ? doc.activeIndex   : 0,
+      benefits: doc.benefits || [],
+      updatedAt: doc.updatedAt,
     });
   } catch (e) {
-    console.error("/nudges/overview error:", e);
+    console.error("/progress GET error:", e);
     return res.status(500).json({ error: "server error" });
   }
 });
-
-// ===== All-task listing, search, pagination =====
-app.get("/nudges/tasks", async (req, res) => {
+app.post("/progress", async (req, res) => {
   try {
-    const {
-      q = "",                 // free-text search across userId, to, fullName, benefitKey
-      status,                 // optional: active | done | paused (if you use paused)
-      page = 1,
-      limit = 25,
-      sort = "-nextAt",       // default: newest due first; examples: "-updatedAt", "userId"
-    } = req.query;
-
-    const lim = Math.min(parseInt(limit) || 25, 200);
-    const skip = Math.max(((parseInt(page) || 1) - 1) * lim, 0);
-
-    const find = {};
-    if (status) find.status = status;
-
-    if (q) {
-      const rx = new RegExp(String(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      find.$or = [
-        { userId: rx },
-        { to: rx },
-        { fullName: rx },
-        { benefitKey: rx },
-      ];
+    let { userId, completed, unlockedCount, activeIndex, benefits } = req.body || {};
+    if (!userId || typeof userId !== "string") {
+      return res.status(400).json({ error: "userId is required" });
     }
 
-    const [items, total] = await Promise.all([
-      NudgeTask.find(find).sort(sort).skip(skip).limit(lim).lean(),
-      NudgeTask.countDocuments(find),
-    ]);
+    const old = await ProgressState.findOne({ userId }).lean();
 
-    res.json({ ok: true, total, page: parseInt(page) || 1, perPage: lim, items });
+    completed    = normalizeBoolArray(completed);
+    unlockedCount= Number.isFinite(+unlockedCount) ? Math.max(0, +unlockedCount) : 1;
+    activeIndex  = Number.isFinite(+activeIndex)   ? Math.max(0, +activeIndex)   : 0;
+    benefits     = Array.isArray(benefits) ? benefits.map(String) : [];
+
+    const doc = await ProgressState.findOneAndUpdate(
+      { userId },
+      { $set: { completed, unlockedCount, activeIndex, benefits } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    const progressed =
+      (old && (Number(activeIndex) > Number(old?.activeIndex) ||
+               Number(unlockedCount) > Number(old?.unlockedCount))) ||
+      (!old && (activeIndex > 0 || unlockedCount > 1));
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        userId: doc.userId,
+        completed: doc.completed,
+        unlockedCount: doc.unlockedCount,
+        activeIndex: doc.activeIndex,
+        benefits: doc.benefits,
+        updatedAt: doc.updatedAt,
+      },
+    });
   } catch (e) {
-    console.error("/nudges/tasks list error:", e);
-    res.status(500).json({ error: "server error" });
-  }
-});
-
-// ===== Quick: mark a task due NOW or change status =====
-// PATCH /nudges/tasks?id=<taskId>
-// body can include: { nextAt: <ISOString>, status: "active"|"done"|"paused", maxAttempts, repeatGapMs, firstGapMs }
-app.patch("/nudges/tasks", async (req, res) => {
-  try {
-    const { id } = req.query || {};
-    if (!id) return res.status(400).json({ error: "id is required" });
-
-    const update = {};
-    if (req.body?.nextAt)      update.nextAt      = new Date(req.body.nextAt);
-    if (req.body?.status)      update.status      = String(req.body.status);
-    if (Number.isFinite(+req.body?.maxAttempts)) update.maxAttempts = Math.max(1, +req.body.maxAttempts);
-    if (Number.isFinite(+req.body?.repeatGapMs)) update.repeatGapMs = Math.max(1000, +req.body.repeatGapMs);
-    if (Number.isFinite(+req.body?.firstGapMs))  update.firstGapMs  = Math.max(1000, +req.body.firstGapMs);
-
-    const doc = await NudgeTask.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
-    if (!doc) return res.status(404).json({ error: "task not found" });
-
-    return res.json({ ok: true, task: doc });
-  } catch (e) {
-    console.error("/nudges/tasks PATCH error:", e);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-
-// ===== Force-run all currently due tasks (handy button) =====
-app.post("/nudges/flush-due", async (req, res) => {
-  try {
-    const limit = Number(req.body?.limit) || 50;
-    const now = new Date();
-    const due = await NudgeTask.find({ status: "active", nextAt: { $lte: now } })
-      .sort({ nextAt: 1 })
-      .limit(limit)
-      .lean();
-
-    let processed = 0;
-    for (const t of due) {
-      await handleTaskSend(t);
-      processed++;
-    }
-    return res.json({ ok: true, processed });
-  } catch (e) {
-    console.error("/nudges/flush-due error:", e);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-
-// ===== Recent SMS logs (optional, all users) =====
-// Shows the latest Twilio sends across everyone (if you want a feed)
-app.get("/sms/logs", async (req, res) => {
-  try {
-    const { limit = 50 } = req.query;
-    const lim = Math.min(parseInt(limit) || 50, 200);
-    const items = await SmsLog.find().sort({ createdAt: -1 }).limit(lim).lean();
-    return res.json({ ok: true, items });
-  } catch (e) {
-    console.error("/sms/logs error:", e);
+    console.error("/progress POST error:", e);
     return res.status(500).json({ error: "server error" });
   }
 });

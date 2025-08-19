@@ -12,29 +12,49 @@ const GAP_AFTER_SECOND = 4 * MINUTE; // to 3rd message
 function computeNextAt(attempts, from = Date.now()) {
   if (attempts === 0) return new Date(from + GAP_AFTER_FIRST);
   if (attempts === 1) return new Date(from + GAP_AFTER_SECOND);
-  return null; // no more
+  return null; // no more sends
 }
 
-// one place for the immediate (landing) template
+// immediate (landing) template
 function buildImmediateLandingMessage({ fullName = "Friend", userId = "unknown" }) {
   const link = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
   return `You still have unclaimed benefits waiting. They expire soon—claim them now: ${link} Reply STOP to opt out.`;
 }
 
-// step follow-up template (worker sends these 2)
+// follow-up template (worker sends the 2 follow-ups)
 function buildFollowupMessage({ fullName = "Friend", userId = "unknown" }) {
   const link = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
   return `Reminder for ${fullName}: finish claiming your benefits here: ${link} Reply STOP to opt out.`;
 }
 
+// ------------------------------------------------------------------
+
+function coerceDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function isDue(nextAt, now = new Date()) {
+  const d = coerceDate(nextAt);
+  return !!(d && d.getTime() <= now.getTime());
+}
+
 module.exports.attachNudges = function attachNudges(app, deps) {
   const {
-    NudgeTask,
-    ProgressState,
-    SmsLog,
-    twilioClient,
-    TWILIO_FROM,
+    NudgeTask,      // Mongoose model with fields: userId, to, fullName, attempts(Number), maxAttempts(Number), status('active'|'done'), nextAt(Date), lastSentAt(Date), lastSid(String), lastError(String), benefitKey(String), claimUrl(String), stepIndex(Number)
+    SmsLog,         // Mongoose model with { userId, to, body, status: 'queued'|'sent'|'failed', sid?, error?, createdAt }, with timestamps: true
+    twilioClient,   // Twilio client
+    TWILIO_FROM,    // E.164 number
   } = deps;
+// server.js (or index.js of your Express app)
+const path = require("path");
+
+// Serve the admin UI
+app.get("/nudges/admin", (_req, res) => {
+  res.sendFile(path.join(__dirname, "nudges-admin.html"));
+});
 
   // low-level SMS helper with logging
   async function sendSmsLogged({ userId, to, body, meta = {} }) {
@@ -58,37 +78,57 @@ module.exports.attachNudges = function attachNudges(app, deps) {
 
   // ========== ROUTES ==========
 
-  // POST /nudges/init
-  // body: { userId, to, fullName }
-  // - returns immediateMessage for FE to send NOW
-  // - creates a single task to drive the 2 worker nudges (3m then +4m)
+  /**
+   * POST /nudges/init
+   * body: { userId, to, fullName, resetOnReinit=true }
+   * - Creates a task if none exists.
+   * - If a task exists and is "done" (or resetOnReinit=true), it resets to active (attempts=0, nextAt=+3m).
+   * - Returns the immediate landing message for FE to send.
+   */
   app.post("/nudges/init", async (req, res) => {
     try {
-      const { userId, to, fullName = "User" } = req.body || {};
+      const { userId, to, fullName = "User", resetOnReinit = true } = req.body || {};
       if (!userId || !to) return res.status(400).json({ error: "userId and to are required" });
 
       const claimUrl = `https://mybenefitsai.org/claim/${encodeURIComponent(userId)}`;
-      const nextAt = computeNextAt(0, Date.now());
+      const existing = await NudgeTask.findOne({ userId, stepIndex: 0 }).lean();
 
-      // upsert a ONE-step task that will send 2 follow-ups (attempts: 0 -> 3m, 1 -> +4m)
-      const task = await NudgeTask.findOneAndUpdate(
-        { userId, stepIndex: 0 },
-        {
-          $set: { to, fullName, benefitKey: "Landing", claimUrl },
-          $setOnInsert: {
-            status: "active",
-            attempts: 0,
-            maxAttempts: 2,  // only 2 worker sends (since first was immediate)
-            nextAt,          // first due in 3 minutes
-          },
-        },
-        { new: true, upsert: true }
-      ).lean();
+      let task;
+
+      if (!existing) {
+        // brand new task
+        task = await NudgeTask.create({
+          userId, to, fullName,
+          benefitKey: "Landing",
+          claimUrl,
+          stepIndex: 0,        // keep 0 for the “landing” step
+          status: "active",    // IMPORTANT: active until all follow-ups sent
+          attempts: 0,
+          maxAttempts: 2,      // two worker sends (FE already sent the landing SMS)
+          nextAt: computeNextAt(0, Date.now()), // first follow-up in 3 minutes
+        });
+      } else {
+        // update contact fields
+        const update = { to, fullName, claimUrl, benefitKey: "Landing" };
+
+        // decide whether to reset attempts/nextAt
+        if (resetOnReinit || existing.status !== "active") {
+          update.status = "active";
+          update.attempts = 0;
+          update.maxAttempts = 2;
+          update.nextAt = computeNextAt(0, Date.now());
+          update.lastError = null;
+        }
+
+        await NudgeTask.updateOne({ _id: existing._id }, { $set: update });
+        task = await NudgeTask.findById(existing._id).lean();
+      }
 
       const immediateMessage = buildImmediateLandingMessage({ fullName, userId });
+
       return res.json({
         ok: true,
-        immediateMessage,
+        immediateMessage, // FE should send this right away
         plan: {
           userId: task.userId,
           to: task.to,
@@ -105,7 +145,10 @@ module.exports.attachNudges = function attachNudges(app, deps) {
     }
   });
 
-  // GET /nudges/tasks  (list all tasks, optional filters)
+  /**
+   * GET /nudges/tasks
+   * Query: q, status, page, limit, sort
+   */
   app.get("/nudges/tasks", async (req, res) => {
     try {
       const {
@@ -138,7 +181,10 @@ module.exports.attachNudges = function attachNudges(app, deps) {
     }
   });
 
-  // GET /nudges/overview (global, shows counts + due now)
+  /**
+   * GET /nudges/overview
+   * Global counters with safer date handling
+   */
   app.get("/nudges/overview", async (_req, res) => {
     try {
       const [tasks, sent, failed] = await Promise.all([
@@ -148,23 +194,27 @@ module.exports.attachNudges = function attachNudges(app, deps) {
       ]);
 
       const now = new Date();
+
       const counts = {
         totalTasks: tasks.length,
         active: tasks.filter(t => t.status === "active").length,
         done: tasks.filter(t => t.status === "done").length,
-        dueNow: tasks.filter(t => t.status === "active" && t.nextAt && t.nextAt <= now).length,
+        dueNow: tasks.filter(t => t.status === "active" && isDue(t.nextAt, now)).length,
         sentSms: sent,
         failedSms: failed,
       };
 
-      res.json({ ok: true, counts });
+      res.json({ ok: true, counts, now });
     } catch (e) {
       console.error("/nudges/overview error:", e);
       res.status(500).json({ error: "server error" });
     }
   });
 
-  // GET /sms/logs?limit=50 (latest logs across everyone)
+  /**
+   * GET /sms/logs
+   * Query: limit
+   */
   app.get("/sms/logs", async (req, res) => {
     try {
       const lim = Math.min(parseInt(req.query.limit) || 50, 200);
@@ -176,7 +226,11 @@ module.exports.attachNudges = function attachNudges(app, deps) {
     }
   });
 
-  // POST /nudges/flush-due  (manual button to run due items)
+  /**
+   * POST /nudges/flush-due
+   * body: { limit? }
+   * Processes up to `limit` due tasks right now.
+   */
   app.post("/nudges/flush-due", async (req, res) => {
     try {
       const limit = Number(req.body?.limit) || 50;
@@ -198,15 +252,91 @@ module.exports.attachNudges = function attachNudges(app, deps) {
     }
   });
 
+  /**
+   * POST /nudges/send-now
+   * body: { userId }
+   * Sends a follow-up immediately (ignores schedule), and advances attempts.
+   */
+  app.post("/nudges/send-now", async (req, res) => {
+    try {
+      const { userId } = req.body || {};
+      if (!userId) return res.status(400).json({ error: "userId required" });
+
+      const task = await NudgeTask.findOne({ userId, stepIndex: 0 }).lean();
+      if (!task) return res.status(404).json({ error: "task not found" });
+
+      await handleTaskSend({ ...task, nextAt: new Date(0) }); // force due
+      const latest = await NudgeTask.findById(task._id).lean();
+      res.json({ ok: true, plan: latest });
+    } catch (e) {
+      console.error("/nudges/send-now error:", e);
+      res.status(500).json({ error: "server error" });
+    }
+  });
+
+  /**
+   * POST /nudges/cancel
+   * body: { userId }
+   * Cancels a task (marks done & clears nextAt).
+   */
+  app.post("/nudges/cancel", async (req, res) => {
+    try {
+      const { userId } = req.body || {};
+      if (!userId) return res.status(400).json({ error: "userId required" });
+
+      const task = await NudgeTask.findOneAndUpdate(
+        { userId, stepIndex: 0 },
+        { $set: { status: "done", nextAt: null } },
+        { new: true }
+      ).lean();
+
+      if (!task) return res.status(404).json({ error: "task not found" });
+      res.json({ ok: true, plan: task });
+    } catch (e) {
+      console.error("/nudges/cancel error:", e);
+      res.status(500).json({ error: "server error" });
+    }
+  });
+
+  /**
+   * POST /nudges/requeue
+   * body: { userId }
+   * Re-activates a done task (attempts remain; nextAt = computeNextAt(attempts))
+   */
+  app.post("/nudges/requeue", async (req, res) => {
+    try {
+      const { userId } = req.body || {};
+      if (!userId) return res.status(400).json({ error: "userId required" });
+
+      const task = await NudgeTask.findOne({ userId, stepIndex: 0 }).lean();
+      if (!task) return res.status(404).json({ error: "task not found" });
+
+      if (task.status === "active") {
+        return res.json({ ok: true, plan: task, note: "already active" });
+      }
+
+      const nextAt = computeNextAt(task.attempts ?? 0, Date.now());
+      await NudgeTask.updateOne(
+        { _id: task._id },
+        { $set: { status: "active", nextAt, lastError: null } }
+      );
+      const latest = await NudgeTask.findById(task._id).lean();
+      res.json({ ok: true, plan: latest });
+    } catch (e) {
+      console.error("/nudges/requeue error:", e);
+      res.status(500).json({ error: "server error" });
+    }
+  });
+
   // ========== WORKER ==========
 
   async function handleTaskSend(task) {
     if (!task || task.status !== "active") return;
 
     const nowMs = Date.now();
-    if (task.nextAt && task.nextAt.getTime() > nowMs) return; // not due yet
+    const due = !task.nextAt || coerceDate(task.nextAt)?.getTime() <= nowMs;
+    if (!due) return; // not due yet
 
-    // Send follow-up (attempt 0 or 1)
     const text = buildFollowupMessage({ fullName: task.fullName, userId: task.userId });
 
     try {
@@ -236,6 +366,7 @@ module.exports.attachNudges = function attachNudges(app, deps) {
             lastSentAt: new Date(),
             lastSid: sid,
             lastError: null,
+            status: "active",           // keep active until final attempt
             nextAt,
           },
         });
@@ -269,6 +400,5 @@ module.exports.attachNudges = function attachNudges(app, deps) {
   // single global worker
   setInterval(runWorker, 10 * 1000);
 
-  // expose for tests if needed
   return { runWorker, handleTaskSend, buildImmediateLandingMessage };
 };
