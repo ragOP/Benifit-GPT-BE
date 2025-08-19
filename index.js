@@ -27,10 +27,15 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN  || "";
 const TWILIO_FROM        = process.env.TWILIO_FROM        || ""; // e.g. +12345551234
-const twilioEnabled = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
+const TWILIO_MESSAGING_SERVICE_SID =
+  process.env.TWILIO_MESSAGING_SERVICE_SID || "";
+
+const twilioEnabled =
+  !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && (TWILIO_FROM || TWILIO_MESSAGING_SERVICE_SID));
+
 
 let twilioClient = null;
-if (twilioEnabled) {
+if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   const twilio = require("twilio");
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 }
@@ -69,14 +74,29 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
-// 4) External Twilio REST router (optional helpers under /api/notify)
+// 4) External Twilio REST router (legacy helpers under /api/notify)
+//    We keep it mounted, but we also define our own unified endpoints below,
+//    so FE calls to /api/notify/sms or /notify/sms will both succeed.
 const twilioRoutes = require("./twilioRoutes");
 app.use("/api/notify", twilioRoutes);
 
 // ====== DB ======
 (async () => { await connectToDatabase(); })();
 
-// ====== SIMPLE SMS SEND (keep this) ======
+// ====== SMALL DEBUG ======
+app.get("/debug/ping", (_req, res) => {
+  res.json({
+    ok: true,
+    twilio: {
+      clientLoaded: !!twilioClient,
+      enabled: twilioEnabled,
+      hasFrom: !!TWILIO_FROM,
+      hasMessagingService: !!TWILIO_MESSAGING_SERVICE_SID,
+    },
+  });
+});
+
+// ====== SIMPLE SMS SEND (unified handler for BOTH /notify/sms and /api/notify/sms) ======
 function parseJsonBody(req){
   if (req && typeof req.body === "string") {
     try { return JSON.parse(req.body); } catch { return {}; }
@@ -95,12 +115,21 @@ function normalizeUS(to){
   return null;
 }
 async function sendSms({ to, body }){
-  if (!twilioEnabled) throw new Error("Twilio not configured (TWILIO_* envs missing).");
-  const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body });
+  if (!twilioEnabled || !twilioClient) {
+    throw new Error("Twilio not configured (set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID).");
+  }
+  const payload = { to, body };
+  if (TWILIO_MESSAGING_SERVICE_SID) {
+    payload.messagingServiceSid = TWILIO_MESSAGING_SERVICE_SID;
+  } else {
+    payload.from = TWILIO_FROM;
+  }
+  const msg = await twilioClient.messages.create(payload);
   return { sid: msg.sid };
 }
 
-app.post("/notify/sms", async (req, res) => {
+// ⬇️ One handler, two paths (works whether FE hits /api/notify/sms or /notify/sms)
+app.post(["/notify/sms", "/api/notify/sms"], async (req, res) => {
   try {
     const body = parseJsonBody(req);
     const rawTo = pickToField(body);
@@ -114,8 +143,8 @@ app.post("/notify/sms", async (req, res) => {
       });
     }
 
-    const userId  = body.userId  || null;
-    const fullName= body.fullName|| "Friend";
+    const userId   = body.userId   || null;
+    const fullName = body.fullName || "Friend";
     const msgBody = (typeof body.message === "string" && body.message.trim())
       ? body.message.trim()
       : `🎉 Hey ${fullName}! You're eligible for benefits we found for you.
@@ -135,8 +164,20 @@ Reply STOP to opt out.`;
       if (queuedId && SmsLog) await SmsLog.findByIdAndUpdate(queuedId, { sid, status: "sent" });
       return res.status(201).json({ ok: true, sid, to, body: msgBody });
     } catch (err) {
-      if (queuedId && SmsLog) await SmsLog.findByIdAndUpdate(queuedId, { status: "failed", error: err?.message || "send failed" });
-      return res.status(500).json({ error: "twilio send failed", detail: err?.message || String(err) });
+      // Surface Twilio error code if present (trial accounts, invalid FROM, unverified TO, etc.)
+      const twilioCode = err?.code || err?.moreInfo || null;
+      if (queuedId && SmsLog) {
+        await SmsLog.findByIdAndUpdate(queuedId, {
+          status: "failed",
+          error: err?.message || "send failed",
+          code: twilioCode || undefined
+        });
+      }
+      return res.status(502).json({
+        error: "twilio send failed",
+        message: err?.message || String(err),
+        code: twilioCode || undefined
+      });
     }
   } catch (e) {
     console.error("/notify/sms fatal error:", e);
@@ -144,6 +185,7 @@ Reply STOP to opt out.`;
   }
 });
 
+// Check last SMS by userId (unchanged)
 app.get("/notify/sms/last", async (req, res) => {
   try {
     const { userId } = req.query || {};
@@ -167,78 +209,13 @@ attachNudges(app, {
   ProgressState,
   SmsLog,
   twilioClient,
-  TWILIO_FROM
+  TWILIO_FROM,
+  TWILIO_MESSAGING_SERVICE_SID,
 });
 
-// ====== PROGRESS (unchanged) ======
+// ====== PROGRESS (keep a single GET/POST pair) ======
 function normalizeBoolArray(arr){ return Array.isArray(arr) ? arr.map(Boolean) : []; }
-app.get("/progress", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId || typeof userId !== "string") {
-      return res.status(400).json({ error: "userId is required" });
-    }
-    const doc = await ProgressState.findOne({ userId }).lean();
-    if (!doc) {
-      return res.json({ userId, completed: [], unlockedCount: 1, activeIndex: 0, benefits: [] });
-    }
-    return res.json({
-      userId: doc.userId,
-      completed: doc.completed || [],
-      unlockedCount: Number.isFinite(doc.unlockedCount) ? doc.unlockedCount : 1,
-      activeIndex: Number.isFinite(doc.activeIndex)   ? doc.activeIndex   : 0,
-      benefits: doc.benefits || [],
-      updatedAt: doc.updatedAt,
-    });
-  } catch (e) {
-    console.error("/progress GET error:", e);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-app.post("/progress", async (req, res) => {
-  try {
-    let { userId, completed, unlockedCount, activeIndex, benefits } = req.body || {};
-    if (!userId || typeof userId !== "string") {
-      return res.status(400).json({ error: "userId is required" });
-    }
 
-    const old = await ProgressState.findOne({ userId }).lean();
-
-    completed    = normalizeBoolArray(completed);
-    unlockedCount= Number.isFinite(+unlockedCount) ? Math.max(0, +unlockedCount) : 1;
-    activeIndex  = Number.isFinite(+activeIndex)   ? Math.max(0, +activeIndex)   : 0;
-    benefits     = Array.isArray(benefits) ? benefits.map(String) : [];
-
-    const doc = await ProgressState.findOneAndUpdate(
-      { userId },
-      { $set: { completed, unlockedCount, activeIndex, benefits } },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).lean();
-
-    const progressed =
-      (old && (Number(activeIndex) > Number(old?.activeIndex) ||
-               Number(unlockedCount) > Number(old?.unlockedCount))) ||
-      (!old && (activeIndex > 0 || unlockedCount > 1));
-
-    return res.status(200).json({
-      ok: true,
-      data: {
-        userId: doc.userId,
-        completed: doc.completed,
-        unlockedCount: doc.unlockedCount,
-        activeIndex: doc.activeIndex,
-        benefits: doc.benefits,
-        updatedAt: doc.updatedAt,
-      },
-    });
-  } catch (e) {
-    console.error("/progress POST error:", e);
-    return res.status(500).json({ error: "server error" });
-  }
-});
-
-
-// ====== PROGRESS ======
 app.get("/progress", async (req, res) => {
   try {
     const { userId } = req.query;
@@ -283,17 +260,10 @@ app.post("/progress", async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
 
-    // stop any legacy Nudge docs if you still use them (optional)
     const progressed =
       (old && (Number(activeIndex) > Number(old?.activeIndex) ||
                Number(unlockedCount) > Number(old?.unlockedCount))) ||
       (!old && (activeIndex > 0 || unlockedCount > 1));
-
-    if (progressed) {
-      // if you still store old Nudge docs:
-      // await Nudge.findOneAndUpdate({ userId, stopped: false }, { $set: { stopped: true, stopReason: "progress" } }).catch(()=>{});
-      // NudgeTask version doesn’t need a kill switch here—the worker checks completion each run.
-    }
 
     return res.status(200).json({
       ok: true,
@@ -643,4 +613,11 @@ app.get("/email", async (_req, res) => {
 // ====== SERVER ======
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
+  console.log("Twilio config:", {
+    ACCOUNT_SID: !!TWILIO_ACCOUNT_SID,
+    AUTH_TOKEN: !!TWILIO_AUTH_TOKEN,
+    FROM: TWILIO_FROM || null,
+    MESSAGING_SERVICE_SID: TWILIO_MESSAGING_SERVICE_SID || null,
+    enabled: twilioEnabled
+  });
 });
